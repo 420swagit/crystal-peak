@@ -14,12 +14,21 @@ const CACHE_TTL_MS = 60 * 1000;
 const NWS_USER_AGENT =
   process.env.NWS_USER_AGENT || 'CrystalPeak/1.0 (contact@example.com)';
 
+// Pass report source (HTML page)
+const CRYSTAL_TO_GREENWATER_URL =
+  'https://wsdot.com/travel/real-time/mountainpasses/Crystal-to-Greenwater';
+
 // ---------------- CACHE ----------------
 let cachedState = null;
 let cachedAt = 0;
 
+// Separate cache for pass report scrape (avoid hammering WSDOT)
+let cachedPassReport = null;
+let cachedPassAt = 0;
+const PASS_TTL_MS = 5 * 60 * 1000;
+
 // ---------------- UTILS ----------------
-async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = 9000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -29,7 +38,23 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
   }
 }
 
-// ---------------- FORECAST ----------------
+function stripTags(html) {
+  return String(html || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Pull value that appears after a label like "Temperature"
+function extractAfterLabel(text, label) {
+  const re = new RegExp(`${label}\\s+([^]+?)\\s+(?=Temperature|Elevation|Travel eastbound|Travel westbound|Conditions|Weather|Last updated|Disclaimer|Real-time traffic alerts|$)`, 'i');
+  const m = text.match(re);
+  return m ? m[1].trim() : null;
+}
+
+// ---------------- FORECAST (NWS) ----------------
 async function fetchNOAAForecast() {
   try {
     const lat = 46.932517;
@@ -92,6 +117,58 @@ async function fetchNOAAForecast() {
   }
 }
 
+// ---------------- PASS REPORT SCRAPE ----------------
+async function fetchCrystalToGreenwaterPassReport() {
+  const now = Date.now();
+  if (cachedPassReport && now - cachedPassAt < PASS_TTL_MS) return cachedPassReport;
+
+  try {
+    const res = await fetchWithTimeout(CRYSTAL_TO_GREENWATER_URL, {
+      headers: { 'User-Agent': NWS_USER_AGENT },
+    });
+    if (!res.ok) throw new Error(`pass report fetch failed: ${res.status}`);
+
+    const html = await res.text();
+    const text = stripTags(html);
+
+    // Extract core fields
+    const temperature = extractAfterLabel(text, 'Temperature');
+    const elevation = extractAfterLabel(text, 'Elevation');
+    const travelEastbound = extractAfterLabel(text, 'Travel eastbound');
+    const travelWestbound = extractAfterLabel(text, 'Travel westbound');
+    const conditions = extractAfterLabel(text, 'Conditions');
+    const weather = extractAfterLabel(text, 'Weather');
+    const lastUpdated = extractAfterLabel(text, 'Last updated');
+
+    const out = {
+      id: 'crystal-to-greenwater',
+      title: 'Crystal → Greenwater Pass Report',
+      temperature: temperature || null,
+      elevation: elevation || null,
+      travelEastbound: travelEastbound || null,
+      travelWestbound: travelWestbound || null,
+      conditions: conditions || null,
+      weather: weather || null,
+      lastUpdated: lastUpdated || null,
+      source: CRYSTAL_TO_GREENWATER_URL,
+      fetchedAt: new Date().toISOString(),
+    };
+
+    cachedPassReport = out;
+    cachedPassAt = now;
+    return out;
+  } catch (err) {
+    console.error('[pass-report]', err);
+    return {
+      id: 'crystal-to-greenwater',
+      title: 'Crystal → Greenwater Pass Report',
+      error: 'Unable to load pass report right now.',
+      source: CRYSTAL_TO_GREENWATER_URL,
+      fetchedAt: new Date().toISOString(),
+    };
+  }
+}
+
 // ---------------- CAMS (HARD-CODED, REAL) ----------------
 function getCams() {
   return [
@@ -131,26 +208,36 @@ function getCams() {
       id: 'sr410-crystal-greenwater',
       name: 'Crystal → Greenwater Pass Report',
       category: 'road',
-      type: 'external',
-      image:
-        'https://wsdot.com/Travel/Real-time/images/mountainpasses-preview.jpg',
-      link:
-        'https://wsdot.com/travel/real-time/mountainpasses/Crystal-to-Greenwater',
-      desc: 'SR-410 winter pass status and restrictions',
+      type: 'pass_report',
+      // This makes the card not empty:
+      image: 'https://wsdot.com/Travel/Real-time/images/mountainpasses-preview.jpg',
+      // This tells the frontend which report to open:
+      passReportId: 'crystal-to-greenwater',
+      link: CRYSTAL_TO_GREENWATER_URL,
+      desc: 'Shows restrictions + conditions + weather (pulled into this site)',
     },
   ];
 }
 
 // ---------------- STATE ----------------
 async function buildState() {
-  const forecast = await fetchNOAAForecast();
+  const [forecast, passReport] = await Promise.all([
+    fetchNOAAForecast(),
+    fetchCrystalToGreenwaterPassReport(),
+  ]);
 
   return {
     generatedAt: new Date().toISOString(),
     FORECAST: forecast,
     CAMS: getCams(),
+    // Put the report under ROADS so it’s available to the UI:
+    ROADS: {
+      passes: [],
+      passReports: {
+        'crystal-to-greenwater': passReport,
+      },
+    },
     WEATHER: [],
-    ROADS: { passes: [] },
     AVAL: null,
     SNOW: null,
     LIFTS: [],
@@ -173,6 +260,12 @@ app.get('/api/state', async (_req, res) => {
   cachedState = state;
   cachedAt = now;
   res.json(state);
+});
+
+// Optional: direct endpoint for the pass report (handy for debugging)
+app.get('/api/pass-report/crystal-to-greenwater', async (_req, res) => {
+  const report = await fetchCrystalToGreenwaterPassReport();
+  res.json(report);
 });
 
 // ---------------- FRONTEND ----------------
