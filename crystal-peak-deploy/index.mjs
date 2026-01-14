@@ -61,9 +61,6 @@ function safeJsonParseDate(dateStr) {
 
 // --- Data sources ---
 async function fetchNOAAForecast() {
-  // Uses NWS API: https://api.weather.gov
-  // 1) resolve point -> grid
-  // 2) fetch forecast + hourly forecast
   try {
     const pointUrl = `https://api.weather.gov/points/${CRYSTAL_LAT},${CRYSTAL_LON}`;
     const pointRes = await fetchWithTimeout(pointUrl, {
@@ -93,14 +90,13 @@ async function fetchNOAAForecast() {
     const daily = await dailyRes.json();
     const hourly = await hourlyRes.json();
 
-    // Transform daily periods into compact UI format
     const dailyPeriods = Array.isArray(daily?.properties?.periods) ? daily.properties.periods : [];
     const dailyOut = dailyPeriods.slice(0, 14).map((p) => {
       const dayLabel = (p?.name || '').slice(0, 3);
       const isNight = !!p?.isNighttime;
       const temp = typeof p?.temperature === 'number' ? p.temperature : null;
       const text = String(p?.shortForecast || '');
-      const snowIn = /snow|flurr/i.test(text) ? 1 : 0; // very rough
+      const snowIn = /snow|flurr/i.test(text) ? 1 : 0; // rough indicator only
       return {
         day: dayLabel || (isNight ? 'Ngt' : 'Day'),
         icon: null,
@@ -113,14 +109,16 @@ async function fetchNOAAForecast() {
       };
     });
 
-    // Hourly simplified
     const hourlyPeriods = Array.isArray(hourly?.properties?.periods) ? hourly.properties.periods : [];
     const hourlyOut = hourlyPeriods.slice(0, 48).map((p) => {
       const dt = p?.startTime ? new Date(p.startTime) : null;
       const hour = dt ? dt.getHours() : null;
-      const label = hour == null ? '' : `${hour === 0 ? 12 : hour > 12 ? hour - 12 : hour}${hour >= 12 ? 'p' : 'a'}`;
+      const label =
+        hour == null
+          ? ''
+          : `${hour === 0 ? 12 : hour > 12 ? hour - 12 : hour}${hour >= 12 ? 'p' : 'a'}`;
       const text = String(p?.shortForecast || '');
-      const snowIn = /snow|flurr/i.test(text) ? 0.2 : 0;
+      const snowIn = /snow|flurr/i.test(text) ? 0.2 : 0; // rough indicator only
       return {
         time: label,
         temp: typeof p?.temperature === 'number' ? p.temperature : null,
@@ -130,19 +128,18 @@ async function fetchNOAAForecast() {
       };
     });
 
-    // Try to derive "snowIn" per day more realistically from detailed text isn't reliable.
-    // We'll still pass something tiny so the UI can show an indicator.
+    // Group day/night into single daily entries
     const groupedDaily = [];
     for (let i = 0; i < dailyOut.length; i += 2) {
       const day = dailyOut[i];
       const night = dailyOut[i + 1];
       groupedDaily.push({
-        day: day.day || 'Day',
+        day: day?.day || 'Day',
         icon: null,
-        hi: day.hi ?? null,
+        hi: day?.hi ?? null,
         lo: night?.lo ?? null,
-        snow: (day.snow || 0) + (night?.snow || 0),
-        text: day.text || '',
+        snow: (day?.snow || 0) + (night?.snow || 0),
+        text: day?.text || '',
       });
     }
 
@@ -172,18 +169,24 @@ async function fetchWSDOTCameras() {
             if (typeof lat !== 'number' || typeof lon !== 'number') return false;
             return haversineMiles(CRYSTAL_LAT, CRYSTAL_LON, lat, lon) <= 40;
           })
-          .slice(0, 16)
+          .slice(0, 24)
       : [];
 
+    // Normalize to a consistent shape that the frontend can render:
+    // - image cams: { type:"image", src:"..." }
+    // - external cams: { type:"external", link:"..." }
     return nearby
       .map((c) => ({
-        id: c.CameraID,
-        title: c.Title,
-        location: c?.CameraLocation?.Description || c?.CameraLocation?.RoadName,
-        image: c.ImageURL,
+        id: `wsdot-cam-${c?.CameraID ?? ''}`,
+        name: c?.Title || 'WSDOT Camera',
+        type: 'image',
+        category: 'highway',
+        src: c?.ImageURL || null,
+        link: c?.ImageURL || null,
+        desc: c?.CameraLocation?.Description || c?.CameraLocation?.RoadName || 'WSDOT traffic camera',
         updated: null,
       }))
-      .filter((c) => !!c.image);
+      .filter((c) => !!c.src);
   } catch (err) {
     console.error('[cams] error', err);
     return [];
@@ -193,7 +196,6 @@ async function fetchWSDOTCameras() {
 async function fetchWSDOTWeatherStations() {
   if (!WSDOT_ACCESS_CODE) return [];
   try {
-    // 1) Station list (lat/lon + StationCode)
     const stationsUrl = `https://wsdot.wa.gov/Traffic/api/WeatherStations/WeatherStationsREST.svc/GetCurrentStationsAsJson?AccessCode=${encodeURIComponent(
       WSDOT_ACCESS_CODE
     )}`;
@@ -214,21 +216,28 @@ async function fetchWSDOTWeatherStations() {
 
     if (nearbyStations.length === 0) return [];
 
-    // 2) Current weather for all stations (includes wind, temp, etc)
     const wxUrl = `https://wsdot.wa.gov/Traffic/api/WeatherInformation/WeatherInformationREST.svc/GetCurrentWeatherInformationAsJson?AccessCode=${encodeURIComponent(
       WSDOT_ACCESS_CODE
     )}`;
     const wxRes = await fetchWithTimeout(wxUrl);
     if (!wxRes.ok) throw new Error(`WSDOT weather failed: ${wxRes.status}`);
     const wx = await wxRes.json();
-    const byId = new Map(Array.isArray(wx) ? wx.map((w) => [w.StationID, w]) : []);
+
+    // WeatherInformation items use StationID — station list uses StationCode.
+    // We map both ways to be resilient.
+    const byStationId = new Map(Array.isArray(wx) ? wx.map((w) => [w.StationID, w]) : []);
+    const byStationCode = new Map(
+      Array.isArray(wx) ? wx.map((w) => [String(w.StationID ?? ''), w]) : []
+    );
 
     return nearbyStations
       .map((s) => {
-        const r = byId.get(s.StationCode) || null;
+        const code = s?.StationCode;
+        const r = byStationId.get(code) || byStationCode.get(String(code)) || null;
+
         return {
-          id: `wsdot-${s.StationCode}`,
-          name: s.StationName || r?.StationName || 'Weather Station',
+          id: `wsdot-${code}`,
+          name: s?.StationName || r?.StationName || 'Weather Station',
           elev: null,
           temp: r?.TemperatureInFahrenheit != null ? Math.round(Number(r.TemperatureInFahrenheit)) : null,
           humidity: r?.RelativeHumidity != null ? Math.round(Number(r.RelativeHumidity)) : null,
@@ -238,7 +247,7 @@ async function fetchWSDOTWeatherStations() {
           updated: safeJsonParseDate(r?.ReadingTime) || null,
         };
       })
-      .filter((w) => w.temp != null || w.wind != null);
+      .filter((w) => w.temp != null || w.wind != null || w.humidity != null);
   } catch (err) {
     console.error('[weather] error', err);
     return [];
@@ -268,13 +277,13 @@ async function fetchPassConditions() {
 
     return {
       passes: nearby.map((p) => ({
-        id: p.MountainPassId,
-        name: p.MountainPassName,
-        status: p.TravelAdvisoryActive ? 'advisory' : (p.RoadCondition || 'unknown'),
-        restriction: p.RestrictionOne?.RestrictionText || p.RestrictionTwo?.RestrictionText || null,
-        temp: p.TemperatureInFahrenheit ?? null,
-        weather: p.WeatherCondition ?? null,
-        updated: safeJsonParseDate(p.DateUpdated) || null,
+        id: p?.MountainPassId,
+        name: p?.MountainPassName,
+        status: p?.TravelAdvisoryActive ? 'advisory' : p?.RoadCondition || 'unknown',
+        restriction: p?.RestrictionOne?.RestrictionText || p?.RestrictionTwo?.RestrictionText || null,
+        temp: p?.TemperatureInFahrenheit ?? null,
+        weather: p?.WeatherCondition ?? null,
+        updated: safeJsonParseDate(p?.DateUpdated) || null,
       })),
     };
   } catch (err) {
@@ -284,20 +293,18 @@ async function fetchPassConditions() {
 }
 
 async function fetchAvalancheData() {
+  // Your previous endpoint can be unreliable. For now, keep it best-effort and return null on failure.
+  // If you want avalanche to definitely show, tell me and I’ll give you a stable approach.
   try {
-    // avalanche.org public API provides forecast products
     const url = 'https://api.avalanche.org/v2/public/product?type=forecast&center_id=NWAC&zone_id=1';
     const res = await fetchWithTimeout(url, {}, 9000);
     if (!res.ok) throw new Error(`avalanche.org failed: ${res.status}`);
     const data = await res.json();
 
-    // This shape can vary; we do a best-effort extraction.
     const today = Array.isArray(data) ? data[0] : data;
-
     const danger = today?.danger || today?.danger_rating || null;
     const level = today?.danger_level || today?.overall_danger || null;
 
-    // Try to pull problem names
     const problems = Array.isArray(today?.avalanche_problems)
       ? today.avalanche_problems.map((p) => p?.name).filter(Boolean)
       : [];
@@ -316,18 +323,11 @@ async function fetchAvalancheData() {
 }
 
 async function fetchLiftStatus() {
-  // Unless you have a real data source, return [] so the UI hides the section.
   if (!OTS_API_KEY || !OTS_RESORT_ID) return [];
-
   try {
-    // NOTE: This is a placeholder; OnTheSnow's partner API details vary.
-    // Keep this function returning [] on failure to avoid showing incorrect data.
     const url = `https://api.onthesnow.com/api/v1/resort/${encodeURIComponent(OTS_RESORT_ID)}/lifts`;
     const res = await fetchWithTimeout(url, {
-      headers: {
-        Authorization: `Bearer ${OTS_API_KEY}`,
-        Accept: 'application/json',
-      },
+      headers: { Authorization: `Bearer ${OTS_API_KEY}`, Accept: 'application/json' },
     });
     if (!res.ok) throw new Error(`OnTheSnow lifts failed: ${res.status}`);
     const data = await res.json();
@@ -347,14 +347,10 @@ async function fetchLiftStatus() {
 
 async function fetchRunStatus() {
   if (!OTS_API_KEY || !OTS_RESORT_ID) return [];
-
   try {
     const url = `https://api.onthesnow.com/api/v1/resort/${encodeURIComponent(OTS_RESORT_ID)}/trails`;
     const res = await fetchWithTimeout(url, {
-      headers: {
-        Authorization: `Bearer ${OTS_API_KEY}`,
-        Accept: 'application/json',
-      },
+      headers: { Authorization: `Bearer ${OTS_API_KEY}`, Accept: 'application/json' },
     });
     if (!res.ok) throw new Error(`OnTheSnow trails failed: ${res.status}`);
     const data = await res.json();
@@ -376,18 +372,15 @@ async function fetchRunStatus() {
 function calcSnowFromForecast(forecast) {
   if (!forecast || !Array.isArray(forecast.daily)) return null;
 
-  // Sum the crude "snow" markers (inches) from the next 24/48 hours.
-  // NOTE: This is only an estimate based on NWS text. If you have a real snow report API, use that.
   const next2Days = forecast.daily.slice(0, 2);
   const new48h = next2Days.reduce((sum, d) => sum + (Number(d.snow) || 0), 0);
   const new24h = Number(next2Days[0]?.snow) || 0;
 
-  // Only show the snow card if the forecast indicates snow (avoid showing 0" always)
   if (new24h <= 0 && new48h <= 0) return null;
 
   return {
-    new24h: new24h,
-    new48h: new48h,
+    new24h,
+    new48h,
     base: null,
     season: null,
     report: 'Estimated from NWS forecast wording (not an official snow report).',
@@ -396,7 +389,7 @@ function calcSnowFromForecast(forecast) {
 }
 
 async function buildState() {
-  const [forecast, cams, weather, roads, aval, lifts, runs] = await Promise.all([
+  const [forecast, wsdotCams, weather, roads, aval, lifts, runs] = await Promise.all([
     fetchNOAAForecast(),
     fetchWSDOTCameras(),
     fetchWSDOTWeatherStations(),
@@ -408,10 +401,32 @@ async function buildState() {
 
   const snow = calcSnowFromForecast(forecast);
 
-  const state = {
+  // Always provide at least a couple official Crystal webcam links.
+  const staticCams = [
+    {
+      id: 'crystal-summit-360',
+      name: 'Crystal Summit 360°',
+      type: 'external',
+      category: 'mountain',
+      link: 'https://crystalmountainresort.roundshot.com/',
+      desc: 'Crystal Mountain summit panorama (official)',
+    },
+    {
+      id: 'crystal-webcams',
+      name: 'Crystal Webcams',
+      type: 'external',
+      category: 'mountain',
+      link: 'https://www.crystalmountainresort.com/the-mountain/webcams',
+      desc: 'Official Crystal Mountain webcam page',
+    },
+  ];
+
+  const allCams = [...staticCams, ...(Array.isArray(wsdotCams) ? wsdotCams : [])];
+
+  return {
     generatedAt: new Date().toISOString(),
     FORECAST: forecast,
-    CAMS: cams,
+    CAMS: allCams,
     WEATHER: weather,
     ROADS: roads,
     AVAL: aval,
@@ -419,8 +434,6 @@ async function buildState() {
     LIFTS: lifts,
     RUNS: runs,
   };
-
-  return state;
 }
 
 // --- API routes ---
