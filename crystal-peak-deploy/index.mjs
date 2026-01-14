@@ -72,7 +72,6 @@ function isAllowedCamUrl(u) {
     if (!['http:', 'https:'].includes(url.protocol)) return false;
     const host = url.hostname.toLowerCase();
 
-    // WSDOT camera images are typically under these domains
     const allowed =
       host === 'wsdot.wa.gov' ||
       host.endsWith('.wsdot.wa.gov') ||
@@ -198,6 +197,88 @@ async function fetchNOAAForecast() {
   }
 }
 
+/**
+ * Freezing level (0°C height) from Open-Meteo.
+ * Returns 7-day daily values in meters above sea level (ASL).
+ * We'll chart MAX per day (most similar to typical “freezing level” charts).
+ */
+async function fetchFreezingLevel() {
+  try {
+    const url =
+      `https://api.open-meteo.com/v1/forecast` +
+      `?latitude=${encodeURIComponent(CRYSTAL_LAT)}` +
+      `&longitude=${encodeURIComponent(CRYSTAL_LON)}` +
+      `&hourly=freezing_level_height` +
+      `&timezone=${encodeURIComponent('America/Los_Angeles')}` +
+      `&forecast_days=7`;
+
+    const res = await fetchWithTimeout(url, {}, 12000);
+    if (!res.ok) throw new Error(`Open-Meteo freezing level failed: ${res.status}`);
+    const data = await res.json();
+
+    const times = data?.hourly?.time;
+    const vals = data?.hourly?.freezing_level_height;
+    if (!Array.isArray(times) || !Array.isArray(vals)) return [];
+
+    // Group hourly values by date (YYYY-MM-DD)
+    const byDate = new Map();
+    const n = Math.min(times.length, vals.length);
+
+    for (let i = 0; i < n; i++) {
+      const t = times[i];
+      const v = vals[i];
+      if (typeof t !== 'string') continue;
+      if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+
+      const date = t.slice(0, 10);
+      let arr = byDate.get(date);
+      if (!arr) {
+        arr = [];
+        byDate.set(date, arr);
+      }
+      arr.push(v);
+    }
+
+    const tz = data?.timezone || 'America/Los_Angeles';
+    const dayFmt = new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: tz });
+
+    const dates = Array.from(byDate.keys()).sort().slice(0, 7);
+
+    const out = dates
+      .map((date) => {
+        const arr = byDate.get(date) || [];
+        if (!arr.length) return null;
+
+        let min = arr[0];
+        let max = arr[0];
+        let sum = 0;
+
+        for (const x of arr) {
+          if (x < min) min = x;
+          if (x > max) max = x;
+          sum += x;
+        }
+
+        const avg = sum / arr.length;
+        const day = dayFmt.format(new Date(`${date}T12:00:00Z`));
+
+        return {
+          date,
+          day,
+          min_m: Math.round(min),
+          max_m: Math.round(max),
+          avg_m: Math.round(avg),
+        };
+      })
+      .filter(Boolean);
+
+    return out;
+  } catch (err) {
+    console.error('[freezing] error', err);
+    return [];
+  }
+}
+
 async function fetchWSDOTCameras() {
   if (!WSDOT_ACCESS_CODE) return [];
 
@@ -212,7 +293,6 @@ async function fetchWSDOTCameras() {
     const all = Array.isArray(data) ? data : [];
 
     // Clean, hardcoded “Crystal approach” road cam matching (SR-410 corridor)
-    // NOTE: We only include cams that ACTUALLY exist in the WSDOT response.
     const allowMatchers = [
       /sr[-\s]?410/i,
       /crystal mountain/i,
@@ -232,7 +312,6 @@ async function fetchWSDOTCameras() {
       return allowMatchers.some((r) => r.test(hay));
     };
 
-    // Also keep things reasonably close to Crystal so we don’t accidentally grab Tacoma/etc.
     const withinMiles = (c, miles) => {
       const lat = c?.CameraLocation?.Latitude;
       const lon = c?.CameraLocation?.Longitude;
@@ -250,7 +329,6 @@ async function fetchWSDOTCameras() {
       })
       .slice(0, 18);
 
-    // Map into frontend format (IMPORTANT: use `src`)
     return filtered
       .map((c) => {
         const img = c?.ImageURL;
@@ -267,7 +345,7 @@ async function fetchWSDOTCameras() {
           name: title,
           type: 'image',
           category: 'road',
-          // proxy to ensure the image actually loads on your site
+          // proxy ensures image loads on HTTPS site
           src: `/api/cam?u=${encodeURIComponent(img)}`,
           link: null,
           desc,
@@ -347,8 +425,6 @@ async function fetchPassConditions() {
 
     const all = Array.isArray(data) ? data : [];
 
-    // “Relevant to Crystal” pass list: Chinook is the big one + a few alternates people actually use.
-    // We only include if present in the API.
     const allowPassNames = [
       /chinook pass/i,
       /cayuse pass/i,
@@ -364,11 +440,10 @@ async function fetchPassConditions() {
       passes: nearby.map((p) => ({
         id: p.MountainPassId,
         name: p.MountainPassName,
-        // used for badge
         status: p.TravelAdvisoryActive ? 'advisory' : cleanText(p.RoadCondition) || 'unknown',
         restriction: cleanText(p.RestrictionOne?.RestrictionText) || cleanText(p.RestrictionTwo?.RestrictionText),
 
-        // pass report fields (for your detail view)
+        // Pass report fields (detail view)
         temp: p.TemperatureInFahrenheit ?? null,
         elevationFt: p.ElevationInFeet ?? null,
         travelEastbound: cleanText(p.TravelEastbound),
@@ -377,7 +452,6 @@ async function fetchPassConditions() {
         weather: cleanText(p.WeatherCondition),
         updated: safeJsonParseDate(p.DateUpdated) || null,
 
-        // optional link (UI will show if present)
         link: 'https://wsdot.com/travel/real-time/mountainpasses',
       })),
     };
@@ -489,8 +563,9 @@ function calcSnowFromForecast(forecast) {
 }
 
 async function buildState() {
-  const [forecast, cams, weather, roads, aval, lifts, runs] = await Promise.all([
+  const [forecast, freezingDaily, cams, weather, roads, aval, lifts, runs] = await Promise.all([
     fetchNOAAForecast(),
+    fetchFreezingLevel(),
     fetchWSDOTCameras(),
     fetchWSDOTWeatherStations(),
     fetchPassConditions(),
@@ -498,6 +573,9 @@ async function buildState() {
     fetchLiftStatus(),
     fetchRunStatus(),
   ]);
+
+  // Attach freezing-level series under FORECAST
+  forecast.freezing = { daily: Array.isArray(freezingDaily) ? freezingDaily : [] };
 
   // Hardcoded “Mountain” cams (official links)
   const staticCams = [
