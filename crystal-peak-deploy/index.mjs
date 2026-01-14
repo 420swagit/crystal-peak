@@ -7,18 +7,18 @@ import { fileURLToPath } from 'node:url';
 const app = express();
 app.use(cors());
 
-// --- Config ---
+// ---------------- CONFIG ----------------
 const PORT = process.env.PORT || 3000;
 const CACHE_TTL_MS = 60 * 1000;
 
 const NWS_USER_AGENT =
   process.env.NWS_USER_AGENT || 'CrystalPeak/1.0 (contact@example.com)';
 
-// --- Simple in-memory cache ---
+// ---------------- CACHE ----------------
 let cachedState = null;
 let cachedAt = 0;
 
-// --- Utils ---
+// ---------------- UTILS ----------------
 async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -29,7 +29,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
   }
 }
 
-// --- Forecast (NWS) ---
+// ---------------- FORECAST ----------------
 async function fetchNOAAForecast() {
   try {
     const lat = 46.932517;
@@ -45,7 +45,7 @@ async function fetchNOAAForecast() {
       }
     );
 
-    if (!pointRes.ok) throw new Error('NWS points failed');
+    if (!pointRes.ok) throw new Error('NWS point failed');
     const point = await pointRes.json();
 
     const [dailyRes, hourlyRes] = await Promise.all([
@@ -86,61 +86,62 @@ async function fetchNOAAForecast() {
       }));
 
     return { daily: dailyOut, hourly: hourlyOut };
-  } catch {
+  } catch (err) {
+    console.error('[forecast]', err);
     return { daily: [], hourly: [] };
   }
 }
 
-// --- HARD-CODED CAMS (clean + relevant) ---
+// ---------------- CAMS (HARD-CODED, REAL) ----------------
 function getCams() {
   return [
-    // ===== Mountain =====
+    // ===== Crystal Mountain (official) =====
     {
       id: 'crystal-summit-360',
       name: 'Crystal Summit 360°',
-      type: 'external',
       category: 'mountain',
-      link: 'https://crystalmountainresort.roundshot.com/',
-      desc: 'Official Crystal Mountain summit panorama',
+      type: 'external',
+      image: 'https://crystalmountainresort.roundshot.com/summit/thumb.jpg',
+      link: 'https://crystalmountainresort.roundshot.com/summit/',
+      desc: 'Official Crystal Mountain summit panorama (Roundshot)',
+    },
+    {
+      id: 'crystal-webcams',
+      name: 'Crystal Mountain Webcams',
+      category: 'mountain',
+      type: 'external',
+      image:
+        'https://www.crystalmountainresort.com/-/media/crystal/images/mountain-report/webcams/webcam-hero.jpg',
+      link:
+        'https://www.crystalmountainresort.com/the-mountain/mountain-report-and-webcams/webcams',
+      desc: 'Official Crystal Mountain webcam page',
     },
 
-    // ===== Road access (SR-410 ONLY) =====
+    // ===== Road access (SR-410) =====
     {
-      id: 'sr410-enumclaw',
-      name: 'SR-410 – Enumclaw',
-      type: 'external',
+      id: 'sr410-route',
+      name: 'SR-410 Road Conditions',
       category: 'road',
-      link: 'https://wsdot.com/Travel/Real-time/Map/',
-      desc: 'Lower access route toward Crystal',
+      type: 'external',
+      image: 'https://wsdot.com/Travel/Real-time/images/rtmap-preview.jpg',
+      link: 'https://wsdot.com/travel/real-time/?route=410',
+      desc: 'WSDOT SR-410 cameras, alerts, and conditions',
     },
     {
-      id: 'sr410-greenwater',
-      name: 'SR-410 – Greenwater',
-      type: 'external',
+      id: 'sr410-crystal-greenwater',
+      name: 'Crystal → Greenwater Pass Report',
       category: 'road',
-      link: 'https://wsdot.com/Travel/Real-time/Map/',
-      desc: 'Mid-route conditions near Greenwater',
-    },
-    {
-      id: 'sr410-crystal-blvd',
-      name: 'SR-410 – Crystal Mountain Blvd',
       type: 'external',
-      category: 'road',
-      link: 'https://wsdot.com/Travel/Real-time/Map/',
-      desc: 'Junction leading directly to Crystal',
-    },
-    {
-      id: 'sr410-chinook-pass',
-      name: 'SR-410 – Chinook Pass',
-      type: 'external',
-      category: 'road',
-      link: 'https://wsdot.com/Travel/Real-time/Map/',
-      desc: 'Seasonal pass status (often closed in winter)',
+      image:
+        'https://wsdot.com/Travel/Real-time/images/mountainpasses-preview.jpg',
+      link:
+        'https://wsdot.com/travel/real-time/mountainpasses/Crystal-to-Greenwater',
+      desc: 'SR-410 winter pass status and restrictions',
     },
   ];
 }
 
-// --- State builder ---
+// ---------------- STATE ----------------
 async function buildState() {
   const forecast = await fetchNOAAForecast();
 
@@ -157,7 +158,7 @@ async function buildState() {
   };
 }
 
-// --- API routes ---
+// ---------------- API ----------------
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
 });
@@ -174,7 +175,7 @@ app.get('/api/state', async (_req, res) => {
   res.json(state);
 });
 
-// --- Static frontend ---
+// ---------------- FRONTEND ----------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const distDir = path.join(__dirname, 'dist');
@@ -188,5 +189,5 @@ if (fs.existsSync(distDir)) {
 }
 
 app.listen(PORT, () => {
-  console.log(`Crystal Peak server listening on ${PORT}`);
+  console.log(`Crystal Peak server listening on port ${PORT}`);
 });
