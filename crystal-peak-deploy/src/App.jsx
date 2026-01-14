@@ -71,7 +71,7 @@ const fmt = {
 
 const statusColor = (s) =>
   ({ open: 'text-emerald-400', hold: 'text-amber-400', closed: 'text-rose-400', partial: 'text-amber-400' }[s] ||
-  'text-slate-400');
+    'text-slate-400');
 const statusBg = (s) =>
   ({
     open: 'bg-emerald-500/20 border-emerald-500/30',
@@ -81,7 +81,7 @@ const statusBg = (s) =>
   }[s] || 'bg-slate-500/20 border-slate-500/30');
 const diffColor = (d) =>
   ({ green: 'bg-emerald-500', blue: 'bg-sky-500', black: 'bg-slate-900', 'double-black': 'bg-slate-900' }[d] ||
-  'bg-slate-500');
+    'bg-slate-500');
 const diffIcon = (d) => ({ green: '●', blue: '■', black: '◆', 'double-black': '◆◆' }[d] || '○');
 
 const Badge = ({ status, lg }) => (
@@ -259,6 +259,7 @@ const Nav = ({ page, setPage, menu, setMenu }) => {
   );
 };
 
+// Home chart: freezing level with week arrows (back up to ~1 month)
 const FreezingLevelCard = ({ units }) => {
   const LAT = 46.932517;
   const LON = -121.48067;
@@ -318,7 +319,7 @@ const FreezingLevelCard = ({ units }) => {
       const date = toISODate(addDays(today, i - weekOffset * 7));
       points.push({
         date,
-        label: dayLabel(date),
+        label: dayLabel(date), // "Wed 14"
         meters: map.has(date) ? map.get(date) : null,
       });
     }
@@ -326,6 +327,7 @@ const FreezingLevelCard = ({ units }) => {
     return points;
   }, [daily, weekOffset]);
 
+  // Left arrow goes back, right arrow goes forward, no right arrow on current week
   const canGoForward = weekOffset > 0;
   const canGoBack = weekOffset < MAX_WEEKS_BACK;
 
@@ -413,7 +415,7 @@ const FreezingLevelCard = ({ units }) => {
         </ResponsiveContainer>
       </div>
 
-      <div className="mt-3 text-xs text-slate-500">Tip: Use the arrows to browse back up to ~1 month of weekly freezing levels.</div>
+      <div className="mt-3 text-xs text-slate-500">Use arrows to browse back ~1 month. No forward arrow on current week.</div>
     </Card>
   );
 };
@@ -461,9 +463,15 @@ const Home = ({ setPage }) => {
             onClick={() => setPage('snow')}
           />
         )}
-        {hasLifts && <Stat icon={Activity} label="Lifts Open" value={`${openLifts}/${LIFTS.length}`} onClick={() => setPage('lifts')} />}
-        {hasRuns && <Stat icon={TrendingUp} label="Groomed" value={groomedRuns} sub={`of ${RUNS.length}`} onClick={() => setPage('runs')} />}
-        {hasTemps && WEATHER[0] && <Stat icon={Thermometer} label={WEATHER[0].name || 'Temp'} value={fmt.temp(WEATHER[0].temp, settings.units)} onClick={() => setPage('temps')} />}
+        {hasLifts && (
+          <Stat icon={Activity} label="Lifts Open" value={`${openLifts}/${LIFTS.length}`} onClick={() => setPage('lifts')} />
+        )}
+        {hasRuns && (
+          <Stat icon={TrendingUp} label="Groomed" value={groomedRuns} sub={`of ${RUNS.length}`} onClick={() => setPage('runs')} />
+        )}
+        {hasTemps && WEATHER[0] && (
+          <Stat icon={Thermometer} label={WEATHER[0].name || 'Temp'} value={fmt.temp(WEATHER[0].temp, settings.units)} onClick={() => setPage('temps')} />
+        )}
       </div>
 
       <FreezingLevelCard units={settings.units} />
@@ -513,8 +521,25 @@ const Cams = () => {
   const [sel, setSel] = useState(null);
   const [imgErr, setImgErr] = useState({});
 
-  const validCams = CAMS.filter((c) => c.src || c.link);
-  const categories = [...new Set(validCams.map((c) => c.category))];
+  // IMPORTANT: accept both `src` and `image` (WSDOT commonly uses `ImageURL` -> server may map to `image`)
+  const normalizeSrc = (c) => c?.src || c?.image || c?.ImageURL || c?.url || null;
+  const normalizeName = (c) => c?.name || c?.title || c?.Title || 'Webcam';
+  const normalizeDesc = (c) => c?.desc || c?.location || c?.Location || '';
+  const normalizeCat = (c) => c?.category || c?.type || 'road';
+
+  const normalized = CAMS.map((c, idx) => ({
+    id: c?.id ?? c?.CameraID ?? idx,
+    name: normalizeName(c),
+    desc: normalizeDesc(c),
+    category: normalizeCat(c),
+    type: c?.type || (normalizeSrc(c) ? 'image' : 'external'),
+    src: normalizeSrc(c),
+    link: c?.link || c?.Link || c?.page || null,
+    icon: c?.icon || '📷',
+  }));
+
+  const validCams = normalized.filter((c) => c.src || c.link);
+  const categories = [...new Set(validCams.map((c) => c.category).filter(Boolean))];
   const cams = filter === 'all' ? validCams : validCams.filter((c) => c.category === filter);
 
   useEffect(() => {
@@ -566,7 +591,13 @@ const Cams = () => {
                 <RefreshCw className="w-5 h-5" />
               </button>
               {cam.link && (
-                <a href={cam.link} target="_blank" rel="noopener noreferrer" className="p-2 bg-slate-800/80 rounded-lg text-white" title="Open in new tab">
+                <a
+                  href={cam.link}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="p-2 bg-slate-800/80 rounded-lg text-white"
+                  title="Open in new tab"
+                >
                   <ExternalLink className="w-5 h-5" />
                 </a>
               )}
@@ -576,6 +607,7 @@ const Cams = () => {
           <div className="p-4">
             <h2 className="text-lg font-semibold text-white">{cam.name}</h2>
             <p className="text-sm text-slate-400 mt-1">{cam.desc}</p>
+            <p className="text-xs text-slate-500 mt-2 capitalize">{cam.category}</p>
           </div>
         </Card>
 
@@ -1000,5 +1032,526 @@ const Runs = () => {
   );
 };
 
-// NOTE: rest of your file continues (Snow, Temps, WindPage, Roads, Backcountry, Info/About/Support/Privacy, App export)
-// If you want, paste the remainder from your current file under here unchanged.
+const Snow = () => {
+  const { settings, data } = useApp();
+  const SNOW = data?.SNOW;
+  if (!SNOW) return <NotAvailable message="Snow report not available" />;
+
+  return (
+    <div className="space-y-4">
+      <Card className="p-6 bg-gradient-to-br from-cyan-500/20 to-blue-500/20 border-cyan-500/30 text-center">
+        <p className="text-sm text-cyan-400 uppercase">New Snow (24h)</p>
+        <p className="text-6xl font-bold text-white mt-2">{fmt.snow(SNOW.new24h, settings.units)}</p>
+        {SNOW.report && <p className="text-slate-400 mt-2">{SNOW.report}</p>}
+      </Card>
+
+      <div className="grid grid-cols-2 gap-3">
+        <Card className="p-4 text-center">
+          <p className="text-xs text-slate-500">48hr</p>
+          <p className="text-2xl font-bold text-white">{fmt.snow(SNOW.new48h, settings.units)}</p>
+        </Card>
+        <Card className="p-4 text-center">
+          <p className="text-xs text-slate-500">Base</p>
+          <p className="text-2xl font-bold text-white">{fmt.snow(SNOW.base, settings.units)}</p>
+        </Card>
+        <Card className="p-4 text-center">
+          <p className="text-xs text-slate-500">Season</p>
+          <p className="text-2xl font-bold text-white">{fmt.snow(SNOW.season, settings.units)}</p>
+        </Card>
+        <Card className="p-4 text-center">
+          <p className="text-xs text-slate-500">Updated</p>
+          <p className="text-lg font-bold text-white">
+            {SNOW.updated ? new Date(SNOW.updated).toLocaleString() : '—'}
+          </p>
+        </Card>
+      </div>
+    </div>
+  );
+};
+
+const Temps = () => {
+  const { settings, data } = useApp();
+  const WEATHER = data?.WEATHER || [];
+  if (WEATHER.length === 0) return <NotAvailable message="Temp data not available" />;
+
+  return (
+    <div className="space-y-4">
+      {WEATHER.map((s, i) => (
+        <Card key={s.id || i} className="p-4">
+          <div className="flex items-start justify-between mb-3">
+            <div>
+              <h3 className="font-semibold text-white">{s.name}</h3>
+              <p className="text-xs text-slate-500">{fmt.elev(s.elev, settings.units)}</p>
+            </div>
+            <p className="text-3xl font-bold text-white">{fmt.temp(s.temp, settings.units)}</p>
+          </div>
+
+          <div className="grid grid-cols-3 gap-4 pt-3 border-t border-slate-700">
+            <div>
+              <p className="text-xs text-slate-500">Wind</p>
+              <p className="text-sm font-medium text-white">
+                {fmt.wind(s.wind, settings.units)} {s.dir || ''}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">Gusts</p>
+              <p className="text-sm font-medium text-white">{fmt.wind(s.gust, settings.units)}</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">Humidity</p>
+              <p className="text-sm font-medium text-white">{s.humidity != null ? `${s.humidity}%` : '—'}</p>
+            </div>
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+};
+
+const WindPage = () => {
+  const { settings, data } = useApp();
+  const WEATHER = data?.WEATHER || [];
+  const withWind = WEATHER.filter((w) => w.wind != null);
+  if (withWind.length === 0) return <NotAvailable message="Wind data not available" />;
+
+  const primary = withWind[0];
+
+  return (
+    <div className="space-y-4">
+      <Card className="p-4">
+        <h3 className="text-sm font-semibold text-slate-400 uppercase mb-3">{primary.name}</h3>
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-4xl font-bold text-white">{fmt.wind(primary.wind, settings.units)}</p>
+            <p className="text-sm text-slate-400">Gusts {fmt.wind(primary.gust, settings.units)}</p>
+          </div>
+          <div className="text-right">
+            <span className="text-4xl">🧭</span>
+            <p className="text-sm text-cyan-400">{primary.dir || '—'}</p>
+          </div>
+        </div>
+      </Card>
+
+      {withWind.length > 1 && (
+        <Card className="p-4">
+          <h3 className="text-sm font-semibold text-slate-400 uppercase mb-3">All Stations</h3>
+          {withWind.map((s, i) => (
+            <div key={s.id || i} className="flex items-center justify-between py-2 border-b border-slate-700/50 last:border-0">
+              <div>
+                <p className="text-sm font-medium text-white">{s.name}</p>
+                <p className="text-xs text-slate-500">{fmt.elev(s.elev, settings.units)}</p>
+              </div>
+              <div className="text-right">
+                <p className="text-sm font-semibold text-white">
+                  {fmt.wind(s.wind, settings.units)} {s.dir || ''}
+                </p>
+                <p className="text-xs text-slate-500">G {fmt.wind(s.gust, settings.units)}</p>
+              </div>
+            </div>
+          ))}
+        </Card>
+      )}
+    </div>
+  );
+};
+
+const Roads = () => {
+  const { data } = useApp();
+  const passes = data?.ROADS?.passes || [];
+  const [sel, setSel] = useState(null);
+
+  if (passes.length === 0) return <NotAvailable message="Road conditions not available" />;
+
+  const selected = sel != null ? passes.find((p) => (p.id ?? p.name) === sel) : null;
+
+  if (selected) {
+    return (
+      <div className="space-y-4">
+        <button onClick={() => setSel(null)} className="flex items-center gap-2 text-cyan-400">
+          <ChevronLeft className="w-4 h-4" />
+          Back
+        </button>
+
+        <Card>
+          <div className="p-4 border-b border-slate-700/50 flex items-start justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-white">{selected.name}</h2>
+              <p className="text-xs text-slate-500 mt-1">Pass report</p>
+            </div>
+            <Badge
+              status={
+                selected.status === 'advisory'
+                  ? 'hold'
+                  : String(selected.status || '').toLowerCase().includes('open')
+                  ? 'open'
+                  : 'closed'
+              }
+            />
+          </div>
+
+          <div className="p-4 space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="bg-slate-900/40 rounded-lg p-3">
+                <p className="text-xs text-slate-500">Temperature</p>
+                <p className="text-sm text-white">{selected.temp != null ? `${selected.temp}°F` : '—'}</p>
+              </div>
+              <div className="bg-slate-900/40 rounded-lg p-3">
+                <p className="text-xs text-slate-500">Weather</p>
+                <p className="text-sm text-white">{selected.weather || '—'}</p>
+              </div>
+            </div>
+
+            {selected.restriction && (
+              <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3">
+                <p className="text-xs text-amber-400 uppercase font-semibold">Travel advisory</p>
+                <p className="text-sm text-amber-200 mt-1">{selected.restriction}</p>
+              </div>
+            )}
+
+            <div className="bg-slate-900/40 rounded-lg p-3">
+              <p className="text-xs text-slate-500">Last updated</p>
+              <p className="text-sm text-white">
+                {selected.updated ? new Date(selected.updated).toLocaleString() : '—'}
+              </p>
+            </div>
+
+            <a
+              href="https://wsdot.com/travel/real-time/mountainpasses"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center justify-center gap-2 p-3 bg-cyan-500/20 border border-cyan-500/30 rounded-lg text-cyan-400"
+            >
+              <ExternalLink className="w-4 h-4" />
+              View on WSDOT
+            </a>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card className="p-4">
+        <h2 className="text-lg font-semibold text-white">Mountain Passes</h2>
+        <p className="text-sm text-slate-400">Tap a pass to view the pass report</p>
+      </Card>
+
+      {passes.map((p, i) => (
+        <Card key={p.id || i} className="p-4" onClick={() => setSel(p.id ?? p.name)}>
+          <div className="flex items-start justify-between mb-2">
+            <h3 className="font-medium text-white">{p.name}</h3>
+            <Badge
+              status={
+                p.status === 'advisory'
+                  ? 'hold'
+                  : String(p.status || '').toLowerCase().includes('open')
+                  ? 'open'
+                  : 'closed'
+              }
+            />
+          </div>
+          {p.restriction && <p className="text-sm text-amber-400 mb-2">{p.restriction}</p>}
+          <div className="flex gap-4 text-xs text-slate-400">
+            {p.temp != null && <span>Temp: {p.temp}°F</span>}
+            {p.weather && <span>{p.weather}</span>}
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+};
+
+const Backcountry = () => {
+  const { data } = useApp();
+  const AVAL = data?.AVAL;
+  if (!AVAL) return <NotAvailable message="Avalanche data not available" />;
+
+  const colors = { 1: 'bg-emerald-500', 2: 'bg-yellow-500', 3: 'bg-amber-500', 4: 'bg-rose-500', 5: 'bg-rose-700' };
+
+  return (
+    <div className="space-y-4">
+      <Card className="p-6 text-center">
+        <p className="text-sm text-slate-400 uppercase">Avalanche Danger</p>
+        <div className="flex items-center justify-center gap-3 mt-4">
+          <div className={`w-16 h-16 ${colors[AVAL.level] || 'bg-slate-500'} rounded-full flex items-center justify-center`}>
+            <span className="text-2xl font-bold text-white">{AVAL.level || '?'}</span>
+          </div>
+          <p className="text-3xl font-bold text-white">{AVAL.danger || 'Unknown'}</p>
+        </div>
+      </Card>
+
+      {AVAL.problems?.length > 0 && (
+        <Card className="p-4">
+          <h3 className="text-sm font-semibold text-slate-400 uppercase mb-3">Problems</h3>
+          <div className="flex flex-wrap gap-2">
+            {AVAL.problems.map((p, i) => (
+              <span key={i} className="px-3 py-1.5 bg-amber-500/20 text-amber-400 rounded-lg text-sm">
+                {p}
+              </span>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {AVAL.summary && (
+        <Card className="p-4">
+          <h3 className="text-sm font-semibold text-slate-400 uppercase mb-3">Summary</h3>
+          <p className="text-slate-300">{AVAL.summary}</p>
+        </Card>
+      )}
+
+      {AVAL.link && (
+        <a
+          href={AVAL.link}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center justify-center gap-2 p-4 bg-cyan-500/20 border border-cyan-500/30 rounded-lg text-cyan-400"
+        >
+          <ExternalLink className="w-5 h-5" />
+          Full NWAC Report
+        </a>
+      )}
+    </div>
+  );
+};
+
+const InfoPage = () => (
+  <Card className="p-4">
+    <h2 className="text-lg font-semibold text-white mb-4">Mountain Info</h2>
+    <div className="space-y-4">
+      <div>
+        <h3 className="text-sm font-semibold text-slate-400 mb-2">Hours</h3>
+        <p className="text-white">9 AM - 4 PM (typical)</p>
+      </div>
+
+      <div className="border-t border-slate-700 pt-4">
+        <h3 className="text-sm font-semibold text-slate-400 mb-2">Links</h3>
+        {[
+          { l: 'Crystal Mountain', u: 'https://www.crystalmountainresort.com' },
+          { l: 'NWAC', u: 'https://nwac.us' },
+          { l: 'WSDOT Passes', u: 'https://wsdot.com/travel/real-time/mountainpasses' },
+        ].map((x) => (
+          <a
+            key={x.l}
+            href={x.u}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center justify-between p-3 bg-slate-900/50 rounded-lg text-slate-300 hover:text-white mt-2"
+          >
+            <span>{x.l}</span>
+            <ExternalLink className="w-4 h-4" />
+          </a>
+        ))}
+      </div>
+
+      <div className="border-t border-slate-700 pt-4">
+        <h3 className="text-sm font-semibold text-slate-400 mb-2">Contact</h3>
+        <p className="text-slate-300">(360) 663-2265</p>
+      </div>
+    </div>
+  </Card>
+);
+
+const About = () => (
+  <div className="space-y-4">
+    <Card className="p-6 text-center">
+      <div className="w-16 h-16 bg-gradient-to-br from-cyan-400 to-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+        <Mountain className="w-10 h-10 text-white" />
+      </div>
+      <h1 className="text-2xl font-bold text-white">Crystal Peak</h1>
+      <p className="text-slate-400 mt-2">Live ski conditions</p>
+    </Card>
+
+    <Card className="p-4">
+      <div className="flex items-start gap-3 p-3 bg-amber-500/10 rounded-lg border border-amber-500/20 mb-4">
+        <AlertTriangle className="w-5 h-5 text-amber-400" />
+        <div>
+          <p className="text-sm text-amber-400 font-medium">Not Affiliated</p>
+          <p className="text-xs text-slate-400">Independent project</p>
+        </div>
+      </div>
+      <h3 className="text-sm font-semibold text-slate-400 uppercase mb-3">Sources</h3>
+      <p className="text-sm text-slate-300">Open-Meteo • NWS • WSDOT • NWAC</p>
+    </Card>
+  </div>
+);
+
+const Support = () => (
+  <div className="space-y-4">
+    <Card className="p-6 text-center">
+      <div className="w-16 h-16 bg-gradient-to-br from-rose-400 to-pink-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+        <Heart className="w-10 h-10 text-white" />
+      </div>
+      <h1 className="text-2xl font-bold text-white">Support</h1>
+    </Card>
+
+    <Card className="p-4">
+      <p className="text-sm text-slate-300 mb-4">Built by skiers!</p>
+      <a
+        href="#"
+        className="flex items-center justify-center gap-2 p-4 bg-amber-500/20 border border-amber-500/30 rounded-lg text-amber-400"
+      >
+        <Coffee className="w-5 h-5" />
+        Buy Coffee
+      </a>
+    </Card>
+  </div>
+);
+
+const Privacy = () => (
+  <Card className="p-4">
+    <h1 className="text-xl font-bold text-white mb-4">Privacy</h1>
+    <div className="space-y-4 text-sm text-slate-300">
+      <p>
+        <strong className="text-white">Storage:</strong> Preferences saved locally
+      </p>
+      <p>
+        <strong className="text-white">Data:</strong> Fetched from public sources (weather/roads/avalanche)
+      </p>
+    </div>
+  </Card>
+);
+
+export default function App() {
+  const [page, setPage] = useState('home');
+  const [menu, setMenu] = useState(false);
+  const [settings, setSettings] = useState(defaultSettings);
+
+  const [data, setData] = useState(null);
+  const [dataLoading, setDataLoading] = useState(true);
+  const [dataErr, setDataErr] = useState(null);
+
+  useEffect(() => {
+    try {
+      const s = localStorage.getItem('cpSettings');
+      if (s) setSettings((p) => ({ ...p, ...JSON.parse(s) }));
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('cpSettings', JSON.stringify(settings));
+    } catch {}
+  }, [settings]);
+
+  useEffect(() => {
+    setMenu(false);
+  }, [page]);
+
+  const refresh = useCallback(async () => {
+    setDataLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/state`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`API ${res.status}`);
+      setData(await res.json());
+      setDataErr(null);
+    } catch (err) {
+      setDataErr(err.message || 'Failed to load');
+    } finally {
+      setDataLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    const i = setInterval(refresh, 120000);
+    return () => clearInterval(i);
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!data) return;
+    const avail = new Set(['home', 'info', 'about', 'support', 'privacy']);
+    if ((data.CAMS?.length ?? 0) > 0) avail.add('cams');
+    if ((data.FORECAST?.daily?.length ?? 0) > 0) avail.add('forecast');
+    if ((data.WEATHER?.length ?? 0) > 0) {
+      avail.add('temps');
+      if (data.WEATHER.some((w) => w.wind != null)) avail.add('wind');
+    }
+    if (data.SNOW) avail.add('snow');
+    if ((data.LIFTS?.length ?? 0) > 0) avail.add('lifts');
+    if ((data.RUNS?.length ?? 0) > 0) avail.add('runs');
+    if (data.AVAL) avail.add('backcountry');
+    if ((data.ROADS?.passes?.length ?? 0) > 0) avail.add('roads');
+    if (!avail.has(page)) setPage('home');
+  }, [data, page]);
+
+  const titles = {
+    home: 'Dashboard',
+    cams: 'Webcams',
+    forecast: 'Forecast',
+    lifts: 'Lifts',
+    runs: 'Runs',
+    snow: 'Snow',
+    temps: 'Temps',
+    wind: 'Wind',
+    roads: 'Roads',
+    backcountry: 'Backcountry',
+    info: 'Info',
+    about: 'About',
+    support: 'Support',
+    privacy: 'Privacy',
+  };
+
+  const render = () => {
+    switch (page) {
+      case 'home':
+        return <Home setPage={setPage} />;
+      case 'cams':
+        return <Cams />;
+      case 'forecast':
+        return <Forecast />;
+      case 'lifts':
+        return <Lifts />;
+      case 'runs':
+        return <Runs />;
+      case 'snow':
+        return <Snow />;
+      case 'temps':
+        return <Temps />;
+      case 'wind':
+        return <WindPage />;
+      case 'roads':
+        return <Roads />;
+      case 'backcountry':
+        return <Backcountry />;
+      case 'info':
+        return <InfoPage />;
+      case 'about':
+        return <About />;
+      case 'support':
+        return <Support />;
+      case 'privacy':
+        return <Privacy />;
+      default:
+        return <Home setPage={setPage} />;
+    }
+  };
+
+  return (
+    <AppContext.Provider value={{ settings, setSettings, data, dataLoading, dataErr, refresh }}>
+      <div className="min-h-screen bg-gradient-to-b from-slate-900 via-slate-900 to-slate-950 text-white">
+        <div
+          className="fixed inset-0 opacity-30 pointer-events-none"
+          style={{
+            backgroundImage:
+              'radial-gradient(circle at 1px 1px, rgba(148,163,184,0.15) 1px, transparent 0)',
+            backgroundSize: '24px 24px',
+          }}
+        />
+        <Nav page={page} setPage={setPage} menu={menu} setMenu={setMenu} />
+        <main className="relative pt-28 pb-8 px-4 max-w-lg mx-auto">
+          {dataErr && <ErrorBanner message={dataErr} onRetry={refresh} />}
+          {page !== 'home' && <h1 className="text-xl font-bold text-white mb-4">{titles[page]}</h1>}
+          {render()}
+        </main>
+        <footer className="relative border-t border-slate-800 py-6 px-4 text-center">
+          <p className="text-xs text-slate-500">Crystal Peak • Not affiliated with Crystal Mountain</p>
+          {data?.generatedAt && (
+            <p className="text-xs text-slate-600 mt-1">Data: {new Date(data.generatedAt).toLocaleTimeString()}</p>
+          )}
+        </footer>
+      </div>
+    </AppContext.Provider>
+  );
+}
