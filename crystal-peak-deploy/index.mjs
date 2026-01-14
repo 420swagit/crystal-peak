@@ -77,6 +77,20 @@ function domFromISODate(isoDate) {
   }
 }
 
+// IMPORTANT: derive a real calendar label from an ISO datetime string.
+// This fixes "Thi" from "This Afternoon".
+function labelFromStartTime(startTime) {
+  try {
+    const d = new Date(startTime);
+    if (Number.isNaN(d.getTime())) return '';
+    const wd = d.toLocaleDateString('en-US', { weekday: 'short' });
+    const dom = d.getDate();
+    return `${wd} ${dom}`;
+  } catch {
+    return '';
+  }
+}
+
 // --- Data sources ---
 async function fetchFreezingLevelDaily() {
   // Open-Meteo freezing level: hourly freezing_level_height (meters)
@@ -165,19 +179,20 @@ async function fetchNOAAForecast() {
     const daily = await dailyRes.json();
     const hourly = await hourlyRes.json();
 
-    // Transform daily periods into compact UI format
+    // Transform daily periods into compact UI format.
+    // FIX: do NOT slice p.name ("This Afternoon" -> "Thi").
+    // Instead derive label from startTime -> "Wed 14".
     const dailyPeriods = Array.isArray(daily?.properties?.periods) ? daily.properties.periods : [];
     const dailyOut = dailyPeriods.slice(0, 14).map((p) => {
-      const dayLabel = (p?.name || '').slice(0, 3);
       const isNight = !!p?.isNighttime;
       const temp = typeof p?.temperature === 'number' ? p.temperature : null;
       const text = String(p?.shortForecast || '');
       const snowIn = /snow|flurr/i.test(text) ? 1 : 0; // very rough
+      const label = p?.startTime ? labelFromStartTime(p.startTime) : '';
       return {
-        day: dayLabel || (isNight ? 'Ngt' : 'Day'),
-        icon: null,
-        hi: isNight ? null : temp,
-        lo: isNight ? temp : null,
+        label: label || (p?.name ? String(p.name) : isNight ? 'Night' : 'Day'),
+        isNight,
+        temp,
         text,
         snow: snowIn,
         wind: p?.windSpeed || null,
@@ -202,17 +217,19 @@ async function fetchNOAAForecast() {
       };
     });
 
+    // Group day+night into a single day row for the UI
     const groupedDaily = [];
     for (let i = 0; i < dailyOut.length; i += 2) {
       const day = dailyOut[i];
       const night = dailyOut[i + 1];
       groupedDaily.push({
-        day: day.day || 'Day',
+        day: day?.label || 'Day',
         icon: null,
-        hi: day.hi ?? null,
-        lo: night?.lo ?? null,
-        snow: (day.snow || 0) + (night?.snow || 0),
-        text: day.text || '',
+        hi: day?.isNight ? null : (day?.temp ?? null),
+        lo: night?.isNight ? (night?.temp ?? null) : null,
+        snow: (day?.snow || 0) + (night?.snow || 0),
+        text: day?.text || '',
+        desc: null,
       });
     }
 
@@ -345,7 +362,6 @@ async function fetchPassConditions() {
         temp: p.TemperatureInFahrenheit ?? null,
         weather: p.WeatherCondition ?? null,
         updated: safeJsonParseDate(p.DateUpdated) || null,
-        // Extra fields (if present in API; harmless if null)
         elevationFt: p.ElevationInFeet ?? null,
         travelEastbound: p.TravelEastbound ?? null,
         travelWestbound: p.TravelWestbound ?? null,
@@ -476,21 +492,21 @@ async function buildState() {
   // Keep your existing cams behavior (frontend already handles image/link)
   const staticCams = [
     {
-      id: "crystal-summit-360",
-      name: "Crystal Summit 360°",
-      type: "external",
-      category: "mountain",
-      link: "https://crystalmountainresort.roundshot.com/",
-      desc: "Crystal Mountain summit panorama (official)"
+      id: 'crystal-summit-360',
+      name: 'Crystal Summit 360°',
+      type: 'external',
+      category: 'mountain',
+      link: 'https://crystalmountainresort.roundshot.com/',
+      desc: 'Crystal Mountain summit panorama (official)',
     },
     {
-      id: "crystal-webcams",
-      name: "Crystal Webcams",
-      type: "external",
-      category: "mountain",
-      link: "https://www.crystalmountainresort.com/the-mountain/webcams",
-      desc: "Official Crystal Mountain webcam page"
-    }
+      id: 'crystal-webcams',
+      name: 'Crystal Webcams',
+      type: 'external',
+      category: 'mountain',
+      link: 'https://www.crystalmountainresort.com/the-mountain/webcams',
+      desc: 'Official Crystal Mountain webcam page',
+    },
   ];
 
   const allCams = [...staticCams, ...(Array.isArray(cams) ? cams : [])];

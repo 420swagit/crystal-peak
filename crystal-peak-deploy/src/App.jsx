@@ -77,7 +77,7 @@ const fmt = {
 
 const statusColor = (s) =>
   ({ open: 'text-emerald-400', hold: 'text-amber-400', closed: 'text-rose-400', partial: 'text-amber-400' }[s] ||
-  'text-slate-400');
+    'text-slate-400');
 const statusBg = (s) =>
   ({
     open: 'bg-emerald-500/20 border-emerald-500/30',
@@ -87,7 +87,7 @@ const statusBg = (s) =>
   }[s] || 'bg-slate-500/20 border-slate-500/30');
 const diffColor = (d) =>
   ({ green: 'bg-emerald-500', blue: 'bg-sky-500', black: 'bg-slate-900', 'double-black': 'bg-slate-900' }[d] ||
-  'bg-slate-500');
+    'bg-slate-500');
 const diffIcon = (d) => ({ green: '●', blue: '■', black: '◆', 'double-black': '◆◆' }[d] || '○');
 
 // ---------------------------
@@ -273,83 +273,26 @@ const Nav = ({ page, setPage, menu, setMenu }) => {
 
 // ---------------------------
 // Freezing level chart (7-day window; browse back 4 weeks)
-// IMPORTANT: Open-Meteo provides freezing level as an HOURLY variable.
-// We compute daily max from hourly data to avoid the 400 error.
-// Docs: https://open-meteo.com/en/docs (Freezing Level Height is under hourly variables)
+// FIX: use backend data (data.FORECAST.freezing.daily) instead of calling Open-Meteo in the browser.
+// This removes the "Freezing API 400" issue entirely.
 // ---------------------------
 const FreezingLevelCard = ({ units }) => {
-  const LAT = 46.932517;
-  const LON = -121.48067;
-
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState(null);
-  const [dailyMax, setDailyMax] = useState([]); // [{date:'YYYY-MM-DD', meters:number|null}]
+  const { data } = useApp();
   const [weekOffset, setWeekOffset] = useState(0);
-
   const MAX_WEEKS_BACK = 4;
 
-  const fetchFreezing = useCallback(async () => {
-    setLoading(true);
-    setErr(null);
-
-    try {
-      const tz = encodeURIComponent('America/Los_Angeles');
-
-      // Pull enough hourly data for 30 days back + 7 days forward
-      const url =
-        `https://api.open-meteo.com/v1/forecast` +
-        `?latitude=${LAT}&longitude=${LON}` +
-        `&hourly=freezing_level_height` +
-        `&timezone=${tz}` +
-        `&past_days=30` +
-        `&forecast_days=7`;
-
-      const res = await fetch(url, { cache: 'no-store' });
-      if (!res.ok) throw new Error(`Freezing API ${res.status}`);
-
-      const j = await res.json();
-      const times = j?.hourly?.time || [];
-      const vals = j?.hourly?.freezing_level_height || [];
-
-      // Compute daily max from hourly values
-      const byDate = new Map(); // date -> max meters
-      for (let i = 0; i < times.length; i++) {
-        const t = times[i];
-        const v = vals[i];
-        const date = typeof t === 'string' ? t.slice(0, 10) : null;
-        if (!date) continue;
-        const n = typeof v === 'number' ? v : null;
-        if (n == null) continue;
-        const prev = byDate.get(date);
-        if (prev == null || n > prev) byDate.set(date, n);
-      }
-
-      // Normalize to sorted list
-      const out = Array.from(byDate.entries())
-        .map(([date, meters]) => ({ date, meters }))
-        .sort((a, b) => a.date.localeCompare(b.date));
-
-      setDailyMax(out);
-    } catch (e) {
-      setErr(e?.message || 'Failed to load freezing levels');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchFreezing();
-    const id = setInterval(fetchFreezing, 6 * 60 * 60 * 1000);
-    return () => clearInterval(id);
-  }, [fetchFreezing]);
+  // backend: data.FORECAST.freezing.daily = [{date, day, dom, max_m, min_m}]
+  const freezingDaily = data?.FORECAST?.freezing?.daily || [];
 
   const weekData = useMemo(() => {
-    const map = new Map(dailyMax.map((d) => [d.date, d.meters]));
+    const map = new Map(
+      freezingDaily
+        .filter((d) => d?.date)
+        .map((d) => [d.date, typeof d.max_m === 'number' ? d.max_m : null])
+    );
+
     const today = new Date();
     const points = [];
-
-    // weekOffset = 0 => current 7 days starting today
-    // weekOffset = 1 => previous week window (today-7 .. today-1), etc.
     for (let i = 0; i < 7; i++) {
       const date = toISODate(addDays(today, i - weekOffset * 7));
       points.push({
@@ -359,9 +302,10 @@ const FreezingLevelCard = ({ units }) => {
       });
     }
     return points;
-  }, [dailyMax, weekOffset]);
+  }, [freezingDaily, weekOffset]);
 
-  const canGoForward = weekOffset > 0; // only show right arrow if not current week
+  const hasAnyData = freezingDaily.length > 0;
+  const canGoForward = weekOffset > 0;
   const canGoBack = weekOffset < MAX_WEEKS_BACK;
 
   const yTickFormatter = (v) => {
@@ -369,28 +313,16 @@ const FreezingLevelCard = ({ units }) => {
     return units === 'metric' ? `${Math.round(v)}m` : `${Math.round(v * 3.28084)}ft`;
   };
 
-  if (loading) {
+  if (!hasAnyData) {
     return (
       <Card className="p-4">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold text-slate-400 uppercase">Freezing Level (7-day)</h3>
-          <Loader className="w-4 h-4 text-cyan-400 animate-spin" />
+          <span className="text-xs text-slate-500">—</span>
         </div>
-        <p className="text-xs text-slate-500 mt-3">Loading freezing levels…</p>
-      </Card>
-    );
-  }
-
-  if (err) {
-    return (
-      <Card className="p-4">
-        <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-slate-400 uppercase">Freezing Level (7-day)</h3>
-          <button onClick={fetchFreezing} className="text-xs text-cyan-400">
-            Retry
-          </button>
-        </div>
-        <p className="text-sm text-rose-400 mt-3">{err}</p>
+        <p className="text-xs text-slate-500 mt-3">
+          Freezing level data unavailable (backend didn’t return freezing.daily).
+        </p>
       </Card>
     );
   }
@@ -501,9 +433,20 @@ const Home = ({ setPage }) => {
             onClick={() => setPage('snow')}
           />
         )}
-        {hasLifts && <Stat icon={Activity} label="Lifts Open" value={`${openLifts}/${LIFTS.length}`} onClick={() => setPage('lifts')} />}
-        {hasRuns && <Stat icon={TrendingUp} label="Groomed" value={groomedRuns} sub={`of ${RUNS.length}`} onClick={() => setPage('runs')} />}
-        {hasTemps && WEATHER[0] && <Stat icon={Thermometer} label={WEATHER[0].name || 'Temp'} value={fmt.temp(WEATHER[0].temp, settings.units)} onClick={() => setPage('temps')} />}
+        {hasLifts && (
+          <Stat icon={Activity} label="Lifts Open" value={`${openLifts}/${LIFTS.length}`} onClick={() => setPage('lifts')} />
+        )}
+        {hasRuns && (
+          <Stat icon={TrendingUp} label="Groomed" value={groomedRuns} sub={`of ${RUNS.length}`} onClick={() => setPage('runs')} />
+        )}
+        {hasTemps && WEATHER[0] && (
+          <Stat
+            icon={Thermometer}
+            label={WEATHER[0].name || 'Temp'}
+            value={fmt.temp(WEATHER[0].temp, settings.units)}
+            onClick={() => setPage('temps')}
+          />
+        )}
       </div>
 
       <FreezingLevelCard units={settings.units} />
@@ -553,21 +496,28 @@ const Cams = () => {
   const [sel, setSel] = useState(null);
   const [imgErr, setImgErr] = useState({});
 
-  const validCams = CAMS.filter((c) => c.src || c.link);
-  const categories = [...new Set(validCams.map((c) => c.category))];
-  const cams = filter === 'all' ? validCams : validCams.filter((c) => c.category === filter);
+  const validCams = CAMS.filter((c) => c.src || c.link || c.image);
+  const categories = [...new Set(validCams.map((c) => c.category).filter(Boolean))];
+
+  const normalized = validCams.map((c) => ({
+    ...c,
+    // support either {src} or {image} coming from backend
+    src: c.src || c.image || null,
+  }));
+
+  const cams = filter === 'all' ? normalized : normalized.filter((c) => c.category === filter);
 
   useEffect(() => {
     if (!sel) return;
-    const exists = validCams.some((c) => c.id === sel);
+    const exists = normalized.some((c) => c.id === sel);
     if (!exists) setSel(null);
-  }, [sel, validCams]);
+  }, [sel, normalized]);
 
-  if (validCams.length === 0) return <NotAvailable message="No webcams available" />;
+  if (normalized.length === 0) return <NotAvailable message="No webcams available" />;
 
   if (sel) {
-    const cam = validCams.find((c) => c.id === sel);
-    const idx = validCams.findIndex((c) => c.id === sel);
+    const cam = normalized.find((c) => c.id === sel);
+    const idx = normalized.findIndex((c) => c.id === sel);
     if (!cam) return null;
 
     return (
@@ -582,7 +532,14 @@ const Cams = () => {
             {cam.type === 'image' && cam.src && !imgErr[cam.id] ? (
               <img
                 src={cam.src}
-                alt={cam.name}
+                alt={cam.name || cam.title}
+                className="w-full h-full object-cover"
+                onError={() => setImgErr((p) => ({ ...p, [cam.id]: true }))}
+              />
+            ) : cam.src && !imgErr[cam.id] ? (
+              <img
+                src={cam.src}
+                alt={cam.name || cam.title}
                 className="w-full h-full object-cover"
                 onError={() => setImgErr((p) => ({ ...p, [cam.id]: true }))}
               />
@@ -620,23 +577,23 @@ const Cams = () => {
           </div>
 
           <div className="p-4">
-            <h2 className="text-lg font-semibold text-white">{cam.name}</h2>
-            <p className="text-sm text-slate-400 mt-1">{cam.desc}</p>
+            <h2 className="text-lg font-semibold text-white">{cam.name || cam.title}</h2>
+            <p className="text-sm text-slate-400 mt-1">{cam.desc || cam.location || ''}</p>
           </div>
         </Card>
 
         <div className="flex gap-2">
           <button
             disabled={idx === 0}
-            onClick={() => setSel(validCams[idx - 1]?.id)}
+            onClick={() => setSel(normalized[idx - 1]?.id)}
             className="flex-1 py-3 bg-slate-800 rounded-lg text-slate-300 disabled:opacity-50 flex items-center justify-center gap-2"
           >
             <ChevronLeft className="w-4 h-4" />
             Prev
           </button>
           <button
-            disabled={idx === validCams.length - 1}
-            onClick={() => setSel(validCams[idx + 1]?.id)}
+            disabled={idx === normalized.length - 1}
+            onClick={() => setSel(normalized[idx + 1]?.id)}
             className="flex-1 py-3 bg-slate-800 rounded-lg text-slate-300 disabled:opacity-50 flex items-center justify-center gap-2"
           >
             Next
@@ -677,10 +634,10 @@ const Cams = () => {
         {cams.map((c) => (
           <Card key={c.id} onClick={() => setSel(c.id)}>
             <div className="aspect-video bg-slate-900 flex items-center justify-center overflow-hidden">
-              {c.type === 'image' && c.src && !imgErr[c.id] ? (
+              {c.src && !imgErr[c.id] ? (
                 <img
                   src={c.src}
-                  alt={c.name}
+                  alt={c.name || c.title}
                   className="w-full h-full object-cover"
                   onError={() => setImgErr((p) => ({ ...p, [c.id]: true }))}
                 />
@@ -689,8 +646,8 @@ const Cams = () => {
               )}
             </div>
             <div className="p-3">
-              <h3 className="text-sm font-medium text-white truncate">{c.name}</h3>
-              <p className="text-xs text-slate-500 capitalize">{c.category}</p>
+              <h3 className="text-sm font-medium text-white truncate">{c.name || c.title}</h3>
+              <p className="text-xs text-slate-500 capitalize">{c.category || 'camera'}</p>
             </div>
           </Card>
         ))}
@@ -765,7 +722,8 @@ const Forecast = () => {
                     <stop offset="95%" stopColor="#06b6d4" stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <XAxis dataKey="hr" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickLine={false} />
+                {/* FIX: backend sends "time", not "hr" */}
+                <XAxis dataKey="time" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickLine={false} />
                 <YAxis hide domain={['dataMin-5', 'dataMax+5']} />
                 <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: 'none', borderRadius: '8px' }} />
                 <Area type="monotone" dataKey="temp" stroke="#06b6d4" strokeWidth={2} fill="url(#tg)" />
@@ -803,6 +761,8 @@ const Forecast = () => {
     </div>
   );
 };
+
+/* ---- Everything below here is unchanged from what you pasted (Lifts, Runs, Snow, Temps, WindPage, Roads, Backcountry, Info, About, Support, Privacy) ---- */
 
 const Lifts = () => {
   const { settings, data } = useApp();
@@ -1046,6 +1006,7 @@ const Runs = () => {
   );
 };
 
+// --- Snow / Temps / WindPage / Roads / Backcountry / InfoPage / About / Support / Privacy unchanged from your paste ---
 const Snow = () => {
   const { settings, data } = useApp();
   const SNOW = data?.SNOW;
@@ -1353,7 +1314,7 @@ const Privacy = () => (
 );
 
 // ---------------------------
-// App Root (default export) — fixes your Render "default not exported" error
+// App Root
 // ---------------------------
 export default function App() {
   const [page, setPage] = useState('home');
