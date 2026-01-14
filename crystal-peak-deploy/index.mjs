@@ -38,7 +38,7 @@ function haversineMiles(lat1, lon1, lat2, lon2) {
   return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -59,54 +59,86 @@ function safeJsonParseDate(dateStr) {
   return new Date(ms).toISOString();
 }
 
-function cleanText(v) {
-  if (v == null) return null;
-  const s = String(v).trim();
-  return s.length ? s : null;
-}
-
-// --- Image proxy (fixes mixed-content/CORS/hotlink issues) ---
-function isAllowedCamUrl(u) {
+function dowShortFromISODate(isoDate) {
   try {
-    const url = new URL(u);
-    if (!['http:', 'https:'].includes(url.protocol)) return false;
-    const host = url.hostname.toLowerCase();
-
-    const allowed =
-      host === 'wsdot.wa.gov' ||
-      host.endsWith('.wsdot.wa.gov') ||
-      host === 'wsdot.com' ||
-      host.endsWith('.wsdot.com');
-
-    return allowed;
+    const d = new Date(`${isoDate}T12:00:00Z`);
+    return d.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
   } catch {
-    return false;
+    return '';
   }
 }
 
-app.get('/api/cam', async (req, res) => {
-  const u = req.query.u;
-  if (!u || typeof u !== 'string') return res.status(400).send('Missing u');
-  if (!isAllowedCamUrl(u)) return res.status(403).send('Not allowed');
-
+function domFromISODate(isoDate) {
   try {
-    const upstream = await fetchWithTimeout(u, {}, 12000);
-    if (!upstream.ok) return res.status(502).send('Bad upstream');
-
-    const ct = upstream.headers.get('content-type') || 'image/jpeg';
-    res.setHeader('Content-Type', ct);
-    res.setHeader('Cache-Control', 'public, max-age=30');
-
-    const buf = Buffer.from(await upstream.arrayBuffer());
-    return res.status(200).send(buf);
-  } catch (e) {
-    console.error('[cam-proxy] error', e);
-    return res.status(500).send('Proxy error');
+    const d = new Date(`${isoDate}T12:00:00Z`);
+    return d.getUTCDate();
+  } catch {
+    return null;
   }
-});
+}
 
 // --- Data sources ---
+async function fetchFreezingLevelDaily() {
+  // Open-Meteo freezing level: hourly freezing_level_height (meters)
+  // Pull past 31 days + next 16 days, then aggregate daily max.
+  try {
+    const url =
+      `https://api.open-meteo.com/v1/forecast` +
+      `?latitude=${encodeURIComponent(CRYSTAL_LAT)}` +
+      `&longitude=${encodeURIComponent(CRYSTAL_LON)}` +
+      `&hourly=freezing_level_height` +
+      `&past_days=31` +
+      `&forecast_days=16` +
+      `&timezone=UTC`;
+
+    const res = await fetchWithTimeout(url, {}, 9000);
+    if (!res.ok) throw new Error(`Open-Meteo freezing failed: ${res.status}`);
+    const data = await res.json();
+
+    const times = data?.hourly?.time;
+    const vals = data?.hourly?.freezing_level_height;
+    if (!Array.isArray(times) || !Array.isArray(vals) || times.length !== vals.length) {
+      return { daily: [] };
+    }
+
+    // Group hourly into daily max/min keyed by YYYY-MM-DD
+    const byDay = new Map();
+    for (let i = 0; i < times.length; i++) {
+      const t = times[i]; // "2026-01-14T03:00"
+      const v = vals[i];
+      if (typeof t !== 'string') continue;
+      const day = t.slice(0, 10);
+      const num = Number(v);
+      if (!Number.isFinite(num)) continue;
+
+      const cur = byDay.get(day) || { max_m: -Infinity, min_m: Infinity };
+      cur.max_m = Math.max(cur.max_m, num);
+      cur.min_m = Math.min(cur.min_m, num);
+      byDay.set(day, cur);
+    }
+
+    const daily = Array.from(byDay.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([date, mm]) => ({
+        date, // YYYY-MM-DD
+        day: dowShortFromISODate(date), // "Wed"
+        dom: domFromISODate(date), // 14
+        max_m: Number.isFinite(mm.max_m) ? Math.round(mm.max_m) : null,
+        min_m: Number.isFinite(mm.min_m) ? Math.round(mm.min_m) : null,
+      }))
+      .filter((d) => d.max_m != null);
+
+    return { daily };
+  } catch (err) {
+    console.error('[freezing] error', err);
+    return { daily: [] };
+  }
+}
+
 async function fetchNOAAForecast() {
+  // Uses NWS API: https://api.weather.gov
+  // 1) resolve point -> grid
+  // 2) fetch forecast + hourly forecast
   try {
     const pointUrl = `https://api.weather.gov/points/${CRYSTAL_LAT},${CRYSTAL_LON}`;
     const pointRes = await fetchWithTimeout(pointUrl, {
@@ -121,13 +153,10 @@ async function fetchNOAAForecast() {
     const hourlyUrl = point?.properties?.forecastHourly;
     if (!forecastUrl || !hourlyUrl) throw new Error('NWS point missing forecast urls');
 
-    const [dailyRes, hourlyRes] = await Promise.all([
-      fetchWithTimeout(forecastUrl, {
-        headers: { 'User-Agent': NWS_USER_AGENT, Accept: 'application/geo+json' },
-      }),
-      fetchWithTimeout(hourlyUrl, {
-        headers: { 'User-Agent': NWS_USER_AGENT, Accept: 'application/geo+json' },
-      }),
+    const [dailyRes, hourlyRes, freezing] = await Promise.all([
+      fetchWithTimeout(forecastUrl, { headers: { 'User-Agent': NWS_USER_AGENT, Accept: 'application/geo+json' } }),
+      fetchWithTimeout(hourlyUrl, { headers: { 'User-Agent': NWS_USER_AGENT, Accept: 'application/geo+json' } }),
+      fetchFreezingLevelDaily(),
     ]);
 
     if (!dailyRes.ok) throw new Error(`NWS daily failed: ${dailyRes.status}`);
@@ -136,13 +165,14 @@ async function fetchNOAAForecast() {
     const daily = await dailyRes.json();
     const hourly = await hourlyRes.json();
 
+    // Transform daily periods into compact UI format
     const dailyPeriods = Array.isArray(daily?.properties?.periods) ? daily.properties.periods : [];
     const dailyOut = dailyPeriods.slice(0, 14).map((p) => {
       const dayLabel = (p?.name || '').slice(0, 3);
       const isNight = !!p?.isNighttime;
       const temp = typeof p?.temperature === 'number' ? p.temperature : null;
       const text = String(p?.shortForecast || '');
-      const snowIn = /snow|flurr/i.test(text) ? 1 : 0; // rough indicator
+      const snowIn = /snow|flurr/i.test(text) ? 1 : 0; // very rough
       return {
         day: dayLabel || (isNight ? 'Ngt' : 'Day'),
         icon: null,
@@ -155,20 +185,16 @@ async function fetchNOAAForecast() {
       };
     });
 
+    // Hourly simplified
     const hourlyPeriods = Array.isArray(hourly?.properties?.periods) ? hourly.properties.periods : [];
     const hourlyOut = hourlyPeriods.slice(0, 48).map((p) => {
       const dt = p?.startTime ? new Date(p.startTime) : null;
       const hour = dt ? dt.getHours() : null;
-      const label =
-        hour == null
-          ? ''
-          : `${hour === 0 ? 12 : hour > 12 ? hour - 12 : hour}${hour >= 12 ? 'p' : 'a'}`;
-
+      const label = hour == null ? '' : `${hour === 0 ? 12 : hour > 12 ? hour - 12 : hour}${hour >= 12 ? 'p' : 'a'}`;
       const text = String(p?.shortForecast || '');
       const snowIn = /snow|flurr/i.test(text) ? 0.2 : 0;
-
       return {
-        time: label, // IMPORTANT: frontend uses this
+        time: label,
         temp: typeof p?.temperature === 'number' ? p.temperature : null,
         precip: null,
         snow: snowIn,
@@ -190,98 +216,15 @@ async function fetchNOAAForecast() {
       });
     }
 
-    return { hourly: hourlyOut, daily: groupedDaily };
+    return { hourly: hourlyOut, daily: groupedDaily, freezing };
   } catch (err) {
     console.error('[forecast] error', err);
-    return { hourly: [], daily: [] };
-  }
-}
-
-/**
- * Freezing level (0°C height) from Open-Meteo.
- * Returns 7-day daily values in meters above sea level (ASL).
- * We'll chart MAX per day (most similar to typical “freezing level” charts).
- */
-async function fetchFreezingLevel() {
-  try {
-    const url =
-      `https://api.open-meteo.com/v1/forecast` +
-      `?latitude=${encodeURIComponent(CRYSTAL_LAT)}` +
-      `&longitude=${encodeURIComponent(CRYSTAL_LON)}` +
-      `&hourly=freezing_level_height` +
-      `&timezone=${encodeURIComponent('America/Los_Angeles')}` +
-      `&forecast_days=7`;
-
-    const res = await fetchWithTimeout(url, {}, 12000);
-    if (!res.ok) throw new Error(`Open-Meteo freezing level failed: ${res.status}`);
-    const data = await res.json();
-
-    const times = data?.hourly?.time;
-    const vals = data?.hourly?.freezing_level_height;
-    if (!Array.isArray(times) || !Array.isArray(vals)) return [];
-
-    // Group hourly values by date (YYYY-MM-DD)
-    const byDate = new Map();
-    const n = Math.min(times.length, vals.length);
-
-    for (let i = 0; i < n; i++) {
-      const t = times[i];
-      const v = vals[i];
-      if (typeof t !== 'string') continue;
-      if (typeof v !== 'number' || !Number.isFinite(v)) continue;
-
-      const date = t.slice(0, 10);
-      let arr = byDate.get(date);
-      if (!arr) {
-        arr = [];
-        byDate.set(date, arr);
-      }
-      arr.push(v);
-    }
-
-    const tz = data?.timezone || 'America/Los_Angeles';
-    const dayFmt = new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: tz });
-
-    const dates = Array.from(byDate.keys()).sort().slice(0, 7);
-
-    const out = dates
-      .map((date) => {
-        const arr = byDate.get(date) || [];
-        if (!arr.length) return null;
-
-        let min = arr[0];
-        let max = arr[0];
-        let sum = 0;
-
-        for (const x of arr) {
-          if (x < min) min = x;
-          if (x > max) max = x;
-          sum += x;
-        }
-
-        const avg = sum / arr.length;
-        const day = dayFmt.format(new Date(`${date}T12:00:00Z`));
-
-        return {
-          date,
-          day,
-          min_m: Math.round(min),
-          max_m: Math.round(max),
-          avg_m: Math.round(avg),
-        };
-      })
-      .filter(Boolean);
-
-    return out;
-  } catch (err) {
-    console.error('[freezing] error', err);
-    return [];
+    return { hourly: [], daily: [], freezing: { daily: [] } };
   }
 }
 
 async function fetchWSDOTCameras() {
   if (!WSDOT_ACCESS_CODE) return [];
-
   try {
     const url = `https://wsdot.wa.gov/Traffic/api/HighwayCameras/HighwayCamerasREST.svc/GetCamerasAsJson?AccessCode=${encodeURIComponent(
       WSDOT_ACCESS_CODE
@@ -290,69 +233,27 @@ async function fetchWSDOTCameras() {
     if (!res.ok) throw new Error(`WSDOT cameras failed: ${res.status}`);
     const data = await res.json();
 
-    const all = Array.isArray(data) ? data : [];
+    // Filter cameras within ~40 miles of Crystal
+    const nearby = Array.isArray(data)
+      ? data
+          .filter((c) => {
+            const lat = c?.CameraLocation?.Latitude;
+            const lon = c?.CameraLocation?.Longitude;
+            if (typeof lat !== 'number' || typeof lon !== 'number') return false;
+            return haversineMiles(CRYSTAL_LAT, CRYSTAL_LON, lat, lon) <= 40;
+          })
+          .slice(0, 16)
+      : [];
 
-    // Clean, hardcoded “Crystal approach” road cam matching (SR-410 corridor)
-    const allowMatchers = [
-      /sr[-\s]?410/i,
-      /crystal mountain/i,
-      /greenwater/i,
-      /enumclaw/i,
-      /chinook pass/i,
-      /cayuse pass/i,
-      /wa[-\s]?410/i,
-    ];
-
-    // Strongly exclude I-90 and Snoqualmie corridor cams
-    const denyMatchers = [/i[-\s]?90/i, /snoqualmie/i, /hyak/i, /eastgate/i];
-
-    const matchesCrystalRoute = (title = '', desc = '', road = '') => {
-      const hay = `${title} ${desc} ${road}`.toLowerCase();
-      if (denyMatchers.some((r) => r.test(hay))) return false;
-      return allowMatchers.some((r) => r.test(hay));
-    };
-
-    const withinMiles = (c, miles) => {
-      const lat = c?.CameraLocation?.Latitude;
-      const lon = c?.CameraLocation?.Longitude;
-      if (typeof lat !== 'number' || typeof lon !== 'number') return false;
-      return haversineMiles(CRYSTAL_LAT, CRYSTAL_LON, lat, lon) <= miles;
-    };
-
-    const filtered = all
-      .filter((c) => {
-        const title = c?.Title || '';
-        const desc = c?.CameraLocation?.Description || '';
-        const road = c?.CameraLocation?.RoadName || '';
-        if (!matchesCrystalRoute(title, desc, road)) return false;
-        return withinMiles(c, 85);
-      })
-      .slice(0, 18);
-
-    return filtered
-      .map((c) => {
-        const img = c?.ImageURL;
-        if (!img) return null;
-
-        const title = cleanText(c?.Title) || 'WSDOT Camera';
-        const desc =
-          cleanText(c?.CameraLocation?.Description) ||
-          cleanText(c?.CameraLocation?.RoadName) ||
-          null;
-
-        return {
-          id: `wsdot-${c?.CameraID ?? title}`,
-          name: title,
-          type: 'image',
-          category: 'road',
-          // proxy ensures image loads on HTTPS site
-          src: `/api/cam?u=${encodeURIComponent(img)}`,
-          link: null,
-          desc,
-          updated: null,
-        };
-      })
-      .filter(Boolean);
+    return nearby
+      .map((c) => ({
+        id: c.CameraID,
+        title: c.Title,
+        location: c?.CameraLocation?.Description || c?.CameraLocation?.RoadName,
+        image: c.ImageURL,
+        updated: null,
+      }))
+      .filter((c) => !!c.image);
   } catch (err) {
     console.error('[cams] error', err);
     return [];
@@ -362,6 +263,7 @@ async function fetchWSDOTCameras() {
 async function fetchWSDOTWeatherStations() {
   if (!WSDOT_ACCESS_CODE) return [];
   try {
+    // 1) Station list (lat/lon + StationCode)
     const stationsUrl = `https://wsdot.wa.gov/Traffic/api/WeatherStations/WeatherStationsREST.svc/GetCurrentStationsAsJson?AccessCode=${encodeURIComponent(
       WSDOT_ACCESS_CODE
     )}`;
@@ -375,13 +277,14 @@ async function fetchWSDOTWeatherStations() {
             const lat = s?.Latitude;
             const lon = s?.Longitude;
             if (typeof lat !== 'number' || typeof lon !== 'number') return false;
-            return haversineMiles(CRYSTAL_LAT, CRYSTAL_LON, lat, lon) <= 60;
+            return haversineMiles(CRYSTAL_LAT, CRYSTAL_LON, lat, lon) <= 50;
           })
-          .slice(0, 8)
+          .slice(0, 6)
       : [];
 
     if (nearbyStations.length === 0) return [];
 
+    // 2) Current weather for all stations (includes wind, temp, etc)
     const wxUrl = `https://wsdot.wa.gov/Traffic/api/WeatherInformation/WeatherInformationREST.svc/GetCurrentWeatherInformationAsJson?AccessCode=${encodeURIComponent(
       WSDOT_ACCESS_CODE
     )}`;
@@ -414,7 +317,6 @@ async function fetchWSDOTWeatherStations() {
 
 async function fetchPassConditions() {
   if (!WSDOT_ACCESS_CODE) return { passes: [] };
-
   try {
     const url = `https://wsdot.wa.gov/Traffic/api/MountainPassConditions/MountainPassConditionsREST.svc/GetMountainPassConditionsAsJson?AccessCode=${encodeURIComponent(
       WSDOT_ACCESS_CODE
@@ -423,36 +325,32 @@ async function fetchPassConditions() {
     if (!res.ok) throw new Error(`WSDOT passes failed: ${res.status}`);
     const data = await res.json();
 
-    const all = Array.isArray(data) ? data : [];
-
-    const allowPassNames = [
-      /chinook pass/i,
-      /cayuse pass/i,
-      /white pass/i,
-      /stevens pass/i,
-    ];
-
-    const nearby = all
-      .filter((p) => allowPassNames.some((r) => r.test(String(p?.MountainPassName || ''))))
-      .slice(0, 10);
+    const nearby = Array.isArray(data)
+      ? data
+          .filter((p) => {
+            const lat = p?.Latitude;
+            const lon = p?.Longitude;
+            if (typeof lat !== 'number' || typeof lon !== 'number') return false;
+            return haversineMiles(CRYSTAL_LAT, CRYSTAL_LON, lat, lon) <= 80;
+          })
+          .slice(0, 10)
+      : [];
 
     return {
       passes: nearby.map((p) => ({
         id: p.MountainPassId,
         name: p.MountainPassName,
-        status: p.TravelAdvisoryActive ? 'advisory' : cleanText(p.RoadCondition) || 'unknown',
-        restriction: cleanText(p.RestrictionOne?.RestrictionText) || cleanText(p.RestrictionTwo?.RestrictionText),
-
-        // Pass report fields (detail view)
+        status: p.TravelAdvisoryActive ? 'advisory' : (p.RoadCondition || 'unknown'),
+        restriction: p.RestrictionOne?.RestrictionText || p.RestrictionTwo?.RestrictionText || null,
         temp: p.TemperatureInFahrenheit ?? null,
-        elevationFt: p.ElevationInFeet ?? null,
-        travelEastbound: cleanText(p.TravelEastbound),
-        travelWestbound: cleanText(p.TravelWestbound),
-        conditions: cleanText(p.RoadCondition),
-        weather: cleanText(p.WeatherCondition),
+        weather: p.WeatherCondition ?? null,
         updated: safeJsonParseDate(p.DateUpdated) || null,
-
-        link: 'https://wsdot.com/travel/real-time/mountainpasses',
+        // Extra fields (if present in API; harmless if null)
+        elevationFt: p.ElevationInFeet ?? null,
+        travelEastbound: p.TravelEastbound ?? null,
+        travelWestbound: p.TravelWestbound ?? null,
+        conditions: p.RoadCondition ?? null,
+        link: p?.MountainPassConditionUrl ?? null,
       })),
     };
   } catch (err) {
@@ -464,7 +362,7 @@ async function fetchPassConditions() {
 async function fetchAvalancheData() {
   try {
     const url = 'https://api.avalanche.org/v2/public/product?type=forecast&center_id=NWAC&zone_id=1';
-    const res = await fetchWithTimeout(url, {}, 12000);
+    const res = await fetchWithTimeout(url, {}, 9000);
     if (!res.ok) throw new Error(`avalanche.org failed: ${res.status}`);
     const data = await res.json();
 
@@ -563,9 +461,8 @@ function calcSnowFromForecast(forecast) {
 }
 
 async function buildState() {
-  const [forecast, freezingDaily, cams, weather, roads, aval, lifts, runs] = await Promise.all([
+  const [forecast, cams, weather, roads, aval, lifts, runs] = await Promise.all([
     fetchNOAAForecast(),
-    fetchFreezingLevel(),
     fetchWSDOTCameras(),
     fetchWSDOTWeatherStations(),
     fetchPassConditions(),
@@ -574,38 +471,31 @@ async function buildState() {
     fetchRunStatus(),
   ]);
 
-  // Attach freezing-level series under FORECAST
-  forecast.freezing = { daily: Array.isArray(freezingDaily) ? freezingDaily : [] };
+  const snow = calcSnowFromForecast(forecast);
 
-  // Hardcoded “Mountain” cams (official links)
+  // Keep your existing cams behavior (frontend already handles image/link)
   const staticCams = [
     {
-      id: 'crystal-roundshot',
-      name: 'Crystal Summit 360°',
-      type: 'external',
-      category: 'mountain',
-      link: 'https://crystalmountainresort.roundshot.com/',
-      src: null,
-      icon: '🏔️',
-      desc: 'Official Crystal Mountain summit panorama.',
+      id: "crystal-summit-360",
+      name: "Crystal Summit 360°",
+      type: "external",
+      category: "mountain",
+      link: "https://crystalmountainresort.roundshot.com/",
+      desc: "Crystal Mountain summit panorama (official)"
     },
     {
-      id: 'crystal-webcams',
-      name: 'Crystal Mountain Webcams',
-      type: 'external',
-      category: 'mountain',
-      link: 'https://www.crystalmountainresort.com/the-mountain/webcams',
-      src: null,
-      icon: '🌐',
-      desc: 'Official webcam page (snow stake + more).',
-    },
+      id: "crystal-webcams",
+      name: "Crystal Webcams",
+      type: "external",
+      category: "mountain",
+      link: "https://www.crystalmountainresort.com/the-mountain/webcams",
+      desc: "Official Crystal Mountain webcam page"
+    }
   ];
 
   const allCams = [...staticCams, ...(Array.isArray(cams) ? cams : [])];
 
-  const snow = calcSnowFromForecast(forecast);
-
-  return {
+  const state = {
     generatedAt: new Date().toISOString(),
     FORECAST: forecast,
     CAMS: allCams,
@@ -616,6 +506,8 @@ async function buildState() {
     LIFTS: lifts,
     RUNS: runs,
   };
+
+  return state;
 }
 
 // --- API routes ---
