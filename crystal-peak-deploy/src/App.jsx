@@ -1,3 +1,4 @@
+// src/App.jsx
 import React, { useState, useEffect, createContext, useContext, useCallback, useMemo } from 'react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
 import {
@@ -35,7 +36,9 @@ const useApp = () => useContext(AppContext);
 const defaultSettings = { units: 'imperial', favorites: [] };
 const API_BASE = '/api';
 
-// --- small date helpers ---
+// ---------------------------
+// Date helpers
+// ---------------------------
 const toISODate = (d) => {
   const x = new Date(d);
   x.setHours(0, 0, 0, 0);
@@ -56,6 +59,9 @@ const dayLabel = (isoDate) => {
   return `${wd} ${dom}`;
 };
 
+// ---------------------------
+// Formatters
+// ---------------------------
 const fmt = {
   temp: (t, u) => (t == null ? '—' : u === 'metric' ? `${Math.round(((t - 32) * 5) / 9)}°C` : `${t}°F`),
   elev: (e, u) => (e == null ? '—' : u === 'metric' ? `${Math.round(e * 0.3048)}m` : `${e.toLocaleString()}'`),
@@ -71,7 +77,7 @@ const fmt = {
 
 const statusColor = (s) =>
   ({ open: 'text-emerald-400', hold: 'text-amber-400', closed: 'text-rose-400', partial: 'text-amber-400' }[s] ||
-    'text-slate-400');
+  'text-slate-400');
 const statusBg = (s) =>
   ({
     open: 'bg-emerald-500/20 border-emerald-500/30',
@@ -81,9 +87,12 @@ const statusBg = (s) =>
   }[s] || 'bg-slate-500/20 border-slate-500/30');
 const diffColor = (d) =>
   ({ green: 'bg-emerald-500', blue: 'bg-sky-500', black: 'bg-slate-900', 'double-black': 'bg-slate-900' }[d] ||
-    'bg-slate-500');
+  'bg-slate-500');
 const diffIcon = (d) => ({ green: '●', blue: '■', black: '◆', 'double-black': '◆◆' }[d] || '○');
 
+// ---------------------------
+// Small UI bits
+// ---------------------------
 const Badge = ({ status, lg }) => (
   <span
     className={`inline-flex items-center gap-1 ${
@@ -139,6 +148,9 @@ const ErrorBanner = ({ message, onRetry }) => (
   </div>
 );
 
+// ---------------------------
+// Nav
+// ---------------------------
 const Nav = ({ page, setPage, menu, setMenu }) => {
   const { settings, setSettings, data, dataLoading } = useApp();
 
@@ -259,14 +271,19 @@ const Nav = ({ page, setPage, menu, setMenu }) => {
   );
 };
 
-// Home chart: freezing level with week arrows (back up to ~1 month)
+// ---------------------------
+// Freezing level chart (7-day window; browse back 4 weeks)
+// IMPORTANT: Open-Meteo provides freezing level as an HOURLY variable.
+// We compute daily max from hourly data to avoid the 400 error.
+// Docs: https://open-meteo.com/en/docs (Freezing Level Height is under hourly variables)
+// ---------------------------
 const FreezingLevelCard = ({ units }) => {
   const LAT = 46.932517;
   const LON = -121.48067;
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(null);
-  const [daily, setDaily] = useState([]);
+  const [dailyMax, setDailyMax] = useState([]); // [{date:'YYYY-MM-DD', meters:number|null}]
   const [weekOffset, setWeekOffset] = useState(0);
 
   const MAX_WEEKS_BACK = 4;
@@ -274,12 +291,15 @@ const FreezingLevelCard = ({ units }) => {
   const fetchFreezing = useCallback(async () => {
     setLoading(true);
     setErr(null);
+
     try {
       const tz = encodeURIComponent('America/Los_Angeles');
+
+      // Pull enough hourly data for 30 days back + 7 days forward
       const url =
         `https://api.open-meteo.com/v1/forecast` +
         `?latitude=${LAT}&longitude=${LON}` +
-        `&daily=freezing_level_height_max` +
+        `&hourly=freezing_level_height` +
         `&timezone=${tz}` +
         `&past_days=30` +
         `&forecast_days=7`;
@@ -288,15 +308,28 @@ const FreezingLevelCard = ({ units }) => {
       if (!res.ok) throw new Error(`Freezing API ${res.status}`);
 
       const j = await res.json();
-      const times = j?.daily?.time || [];
-      const vals = j?.daily?.freezing_level_height_max || [];
+      const times = j?.hourly?.time || [];
+      const vals = j?.hourly?.freezing_level_height || [];
 
-      const out = times.map((t, i) => ({
-        date: t,
-        meters: typeof vals[i] === 'number' ? vals[i] : null,
-      }));
+      // Compute daily max from hourly values
+      const byDate = new Map(); // date -> max meters
+      for (let i = 0; i < times.length; i++) {
+        const t = times[i];
+        const v = vals[i];
+        const date = typeof t === 'string' ? t.slice(0, 10) : null;
+        if (!date) continue;
+        const n = typeof v === 'number' ? v : null;
+        if (n == null) continue;
+        const prev = byDate.get(date);
+        if (prev == null || n > prev) byDate.set(date, n);
+      }
 
-      setDaily(out);
+      // Normalize to sorted list
+      const out = Array.from(byDate.entries())
+        .map(([date, meters]) => ({ date, meters }))
+        .sort((a, b) => a.date.localeCompare(b.date));
+
+      setDailyMax(out);
     } catch (e) {
       setErr(e?.message || 'Failed to load freezing levels');
     } finally {
@@ -311,10 +344,12 @@ const FreezingLevelCard = ({ units }) => {
   }, [fetchFreezing]);
 
   const weekData = useMemo(() => {
-    const map = new Map(daily.map((d) => [d.date, d.meters]));
+    const map = new Map(dailyMax.map((d) => [d.date, d.meters]));
     const today = new Date();
     const points = [];
 
+    // weekOffset = 0 => current 7 days starting today
+    // weekOffset = 1 => previous week window (today-7 .. today-1), etc.
     for (let i = 0; i < 7; i++) {
       const date = toISODate(addDays(today, i - weekOffset * 7));
       points.push({
@@ -323,12 +358,10 @@ const FreezingLevelCard = ({ units }) => {
         meters: map.has(date) ? map.get(date) : null,
       });
     }
-
     return points;
-  }, [daily, weekOffset]);
+  }, [dailyMax, weekOffset]);
 
-  // Left arrow goes back, right arrow goes forward, no right arrow on current week
-  const canGoForward = weekOffset > 0;
+  const canGoForward = weekOffset > 0; // only show right arrow if not current week
   const canGoBack = weekOffset < MAX_WEEKS_BACK;
 
   const yTickFormatter = (v) => {
@@ -408,18 +441,23 @@ const FreezingLevelCard = ({ units }) => {
             <Tooltip
               contentStyle={{ backgroundColor: '#1e293b', border: 'none', borderRadius: '8px' }}
               labelStyle={{ color: '#cbd5e1' }}
-              formatter={(val) => [fmt.height(val, units), 'Freezing level']}
+              formatter={(val) => [fmt.height(val, units), 'Freezing level (max)']}
             />
             <Line type="monotone" dataKey="meters" stroke="#f59e0b" strokeWidth={2} dot={false} connectNulls />
           </LineChart>
         </ResponsiveContainer>
       </div>
 
-      <div className="mt-3 text-xs text-slate-500">Use arrows to browse back ~1 month. No forward arrow on current week.</div>
+      <div className="mt-3 text-xs text-slate-500">
+        Tip: Use the arrows to browse back up to ~1 month of weekly freezing levels.
+      </div>
     </Card>
   );
 };
 
+// ---------------------------
+// Pages
+// ---------------------------
 const Home = ({ setPage }) => {
   const { settings, data } = useApp();
 
@@ -463,15 +501,9 @@ const Home = ({ setPage }) => {
             onClick={() => setPage('snow')}
           />
         )}
-        {hasLifts && (
-          <Stat icon={Activity} label="Lifts Open" value={`${openLifts}/${LIFTS.length}`} onClick={() => setPage('lifts')} />
-        )}
-        {hasRuns && (
-          <Stat icon={TrendingUp} label="Groomed" value={groomedRuns} sub={`of ${RUNS.length}`} onClick={() => setPage('runs')} />
-        )}
-        {hasTemps && WEATHER[0] && (
-          <Stat icon={Thermometer} label={WEATHER[0].name || 'Temp'} value={fmt.temp(WEATHER[0].temp, settings.units)} onClick={() => setPage('temps')} />
-        )}
+        {hasLifts && <Stat icon={Activity} label="Lifts Open" value={`${openLifts}/${LIFTS.length}`} onClick={() => setPage('lifts')} />}
+        {hasRuns && <Stat icon={TrendingUp} label="Groomed" value={groomedRuns} sub={`of ${RUNS.length}`} onClick={() => setPage('runs')} />}
+        {hasTemps && WEATHER[0] && <Stat icon={Thermometer} label={WEATHER[0].name || 'Temp'} value={fmt.temp(WEATHER[0].temp, settings.units)} onClick={() => setPage('temps')} />}
       </div>
 
       <FreezingLevelCard units={settings.units} />
@@ -521,25 +553,8 @@ const Cams = () => {
   const [sel, setSel] = useState(null);
   const [imgErr, setImgErr] = useState({});
 
-  // IMPORTANT: accept both `src` and `image` (WSDOT commonly uses `ImageURL` -> server may map to `image`)
-  const normalizeSrc = (c) => c?.src || c?.image || c?.ImageURL || c?.url || null;
-  const normalizeName = (c) => c?.name || c?.title || c?.Title || 'Webcam';
-  const normalizeDesc = (c) => c?.desc || c?.location || c?.Location || '';
-  const normalizeCat = (c) => c?.category || c?.type || 'road';
-
-  const normalized = CAMS.map((c, idx) => ({
-    id: c?.id ?? c?.CameraID ?? idx,
-    name: normalizeName(c),
-    desc: normalizeDesc(c),
-    category: normalizeCat(c),
-    type: c?.type || (normalizeSrc(c) ? 'image' : 'external'),
-    src: normalizeSrc(c),
-    link: c?.link || c?.Link || c?.page || null,
-    icon: c?.icon || '📷',
-  }));
-
-  const validCams = normalized.filter((c) => c.src || c.link);
-  const categories = [...new Set(validCams.map((c) => c.category).filter(Boolean))];
+  const validCams = CAMS.filter((c) => c.src || c.link);
+  const categories = [...new Set(validCams.map((c) => c.category))];
   const cams = filter === 'all' ? validCams : validCams.filter((c) => c.category === filter);
 
   useEffect(() => {
@@ -607,7 +622,6 @@ const Cams = () => {
           <div className="p-4">
             <h2 className="text-lg font-semibold text-white">{cam.name}</h2>
             <p className="text-sm text-slate-400 mt-1">{cam.desc}</p>
-            <p className="text-xs text-slate-500 mt-2 capitalize">{cam.category}</p>
           </div>
         </Card>
 
@@ -1042,7 +1056,7 @@ const Snow = () => {
       <Card className="p-6 bg-gradient-to-br from-cyan-500/20 to-blue-500/20 border-cyan-500/30 text-center">
         <p className="text-sm text-cyan-400 uppercase">New Snow (24h)</p>
         <p className="text-6xl font-bold text-white mt-2">{fmt.snow(SNOW.new24h, settings.units)}</p>
-        {SNOW.report && <p className="text-slate-400 mt-2">{SNOW.report}</p>}
+        {SNOW.surface && <p className="text-slate-400 mt-2">{SNOW.surface}</p>}
       </Card>
 
       <div className="grid grid-cols-2 gap-3">
@@ -1060,11 +1074,11 @@ const Snow = () => {
         </Card>
         <Card className="p-4 text-center">
           <p className="text-xs text-slate-500">Updated</p>
-          <p className="text-lg font-bold text-white">
-            {SNOW.updated ? new Date(SNOW.updated).toLocaleString() : '—'}
-          </p>
+          <p className="text-lg font-bold text-white">{SNOW.updated || '—'}</p>
         </Card>
       </div>
+
+      {SNOW.report && <Card className="p-4 text-sm text-slate-300">{SNOW.report}</Card>}
     </div>
   );
 };
@@ -1085,7 +1099,6 @@ const Temps = () => {
             </div>
             <p className="text-3xl font-bold text-white">{fmt.temp(s.temp, settings.units)}</p>
           </div>
-
           <div className="grid grid-cols-3 gap-4 pt-3 border-t border-slate-700">
             <div>
               <p className="text-xs text-slate-500">Wind</p>
@@ -1115,7 +1128,6 @@ const WindPage = () => {
   if (withWind.length === 0) return <NotAvailable message="Wind data not available" />;
 
   const primary = withWind[0];
-
   return (
     <div className="space-y-4">
       <Card className="p-4">
@@ -1158,103 +1170,34 @@ const WindPage = () => {
 const Roads = () => {
   const { data } = useApp();
   const passes = data?.ROADS?.passes || [];
-  const [sel, setSel] = useState(null);
-
   if (passes.length === 0) return <NotAvailable message="Road conditions not available" />;
 
-  const selected = sel != null ? passes.find((p) => (p.id ?? p.name) === sel) : null;
-
-  if (selected) {
-    return (
-      <div className="space-y-4">
-        <button onClick={() => setSel(null)} className="flex items-center gap-2 text-cyan-400">
-          <ChevronLeft className="w-4 h-4" />
-          Back
-        </button>
-
-        <Card>
-          <div className="p-4 border-b border-slate-700/50 flex items-start justify-between">
-            <div>
-              <h2 className="text-lg font-semibold text-white">{selected.name}</h2>
-              <p className="text-xs text-slate-500 mt-1">Pass report</p>
-            </div>
-            <Badge
-              status={
-                selected.status === 'advisory'
-                  ? 'hold'
-                  : String(selected.status || '').toLowerCase().includes('open')
-                  ? 'open'
-                  : 'closed'
-              }
-            />
-          </div>
-
-          <div className="p-4 space-y-3">
-            <div className="grid grid-cols-2 gap-3">
-              <div className="bg-slate-900/40 rounded-lg p-3">
-                <p className="text-xs text-slate-500">Temperature</p>
-                <p className="text-sm text-white">{selected.temp != null ? `${selected.temp}°F` : '—'}</p>
-              </div>
-              <div className="bg-slate-900/40 rounded-lg p-3">
-                <p className="text-xs text-slate-500">Weather</p>
-                <p className="text-sm text-white">{selected.weather || '—'}</p>
-              </div>
-            </div>
-
-            {selected.restriction && (
-              <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3">
-                <p className="text-xs text-amber-400 uppercase font-semibold">Travel advisory</p>
-                <p className="text-sm text-amber-200 mt-1">{selected.restriction}</p>
-              </div>
-            )}
-
-            <div className="bg-slate-900/40 rounded-lg p-3">
-              <p className="text-xs text-slate-500">Last updated</p>
-              <p className="text-sm text-white">
-                {selected.updated ? new Date(selected.updated).toLocaleString() : '—'}
-              </p>
-            </div>
-
-            <a
-              href="https://wsdot.com/travel/real-time/mountainpasses"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center justify-center gap-2 p-3 bg-cyan-500/20 border border-cyan-500/30 rounded-lg text-cyan-400"
-            >
-              <ExternalLink className="w-4 h-4" />
-              View on WSDOT
-            </a>
-          </div>
-        </Card>
-      </div>
-    );
-  }
+  const badgeFromPass = (p) => {
+    if (p.status === 'advisory') return 'hold';
+    const s = String(p.status || '').toLowerCase();
+    if (s.includes('open') || s.includes('bare') || s.includes('clear') || s.includes('dry')) return 'open';
+    if (s.includes('close')) return 'closed';
+    return 'hold';
+  };
 
   return (
     <div className="space-y-4">
       <Card className="p-4">
         <h2 className="text-lg font-semibold text-white">Mountain Passes</h2>
-        <p className="text-sm text-slate-400">Tap a pass to view the pass report</p>
+        <p className="text-sm text-slate-400">Via WSDOT</p>
       </Card>
 
       {passes.map((p, i) => (
-        <Card key={p.id || i} className="p-4" onClick={() => setSel(p.id ?? p.name)}>
+        <Card key={p.id || i} className="p-4">
           <div className="flex items-start justify-between mb-2">
             <h3 className="font-medium text-white">{p.name}</h3>
-            <Badge
-              status={
-                p.status === 'advisory'
-                  ? 'hold'
-                  : String(p.status || '').toLowerCase().includes('open')
-                  ? 'open'
-                  : 'closed'
-              }
-            />
+            <Badge status={badgeFromPass(p)} />
           </div>
           {p.restriction && <p className="text-sm text-amber-400 mb-2">{p.restriction}</p>}
-          <div className="flex gap-4 text-xs text-slate-400">
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400">
             {p.temp != null && <span>Temp: {p.temp}°F</span>}
             {p.weather && <span>{p.weather}</span>}
+            {p.updated && <span>Updated: {new Date(p.updated).toLocaleString()}</span>}
           </div>
         </Card>
       ))}
@@ -1372,7 +1315,7 @@ const About = () => (
         </div>
       </div>
       <h3 className="text-sm font-semibold text-slate-400 uppercase mb-3">Sources</h3>
-      <p className="text-sm text-slate-300">Open-Meteo • NWS • WSDOT • NWAC</p>
+      <p className="text-sm text-slate-300">NWS • WSDOT • NWAC • Open-Meteo</p>
     </Card>
   </div>
 );
@@ -1385,13 +1328,9 @@ const Support = () => (
       </div>
       <h1 className="text-2xl font-bold text-white">Support</h1>
     </Card>
-
     <Card className="p-4">
       <p className="text-sm text-slate-300 mb-4">Built by skiers!</p>
-      <a
-        href="#"
-        className="flex items-center justify-center gap-2 p-4 bg-amber-500/20 border border-amber-500/30 rounded-lg text-amber-400"
-      >
+      <a href="#" className="flex items-center justify-center gap-2 p-4 bg-amber-500/20 border border-amber-500/30 rounded-lg text-amber-400">
         <Coffee className="w-5 h-5" />
         Buy Coffee
       </a>
@@ -1407,12 +1346,15 @@ const Privacy = () => (
         <strong className="text-white">Storage:</strong> Preferences saved locally
       </p>
       <p>
-        <strong className="text-white">Data:</strong> Fetched from public sources (weather/roads/avalanche)
+        <strong className="text-white">Data:</strong> Fetched from NWS, WSDOT, NWAC, Open-Meteo
       </p>
     </div>
   </Card>
 );
 
+// ---------------------------
+// App Root (default export) — fixes your Render "default not exported" error
+// ---------------------------
 export default function App() {
   const [page, setPage] = useState('home');
   const [menu, setMenu] = useState(false);
@@ -1428,13 +1370,11 @@ export default function App() {
       if (s) setSettings((p) => ({ ...p, ...JSON.parse(s) }));
     } catch {}
   }, []);
-
   useEffect(() => {
     try {
       localStorage.setItem('cpSettings', JSON.stringify(settings));
     } catch {}
   }, [settings]);
-
   useEffect(() => {
     setMenu(false);
   }, [page]);
@@ -1447,7 +1387,7 @@ export default function App() {
       setData(await res.json());
       setDataErr(null);
     } catch (err) {
-      setDataErr(err.message || 'Failed to load');
+      setDataErr(err.message);
     } finally {
       setDataLoading(false);
     }
@@ -1461,6 +1401,7 @@ export default function App() {
 
   useEffect(() => {
     if (!data) return;
+
     const avail = new Set(['home', 'info', 'about', 'support', 'privacy']);
     if ((data.CAMS?.length ?? 0) > 0) avail.add('cams');
     if ((data.FORECAST?.daily?.length ?? 0) > 0) avail.add('forecast');
@@ -1473,6 +1414,7 @@ export default function App() {
     if ((data.RUNS?.length ?? 0) > 0) avail.add('runs');
     if (data.AVAL) avail.add('backcountry');
     if ((data.ROADS?.passes?.length ?? 0) > 0) avail.add('roads');
+
     if (!avail.has(page)) setPage('home');
   }, [data, page]);
 
@@ -1534,8 +1476,7 @@ export default function App() {
         <div
           className="fixed inset-0 opacity-30 pointer-events-none"
           style={{
-            backgroundImage:
-              'radial-gradient(circle at 1px 1px, rgba(148,163,184,0.15) 1px, transparent 0)',
+            backgroundImage: 'radial-gradient(circle at 1px 1px, rgba(148,163,184,0.15) 1px, transparent 0)',
             backgroundSize: '24px 24px',
           }}
         />
@@ -1547,9 +1488,7 @@ export default function App() {
         </main>
         <footer className="relative border-t border-slate-800 py-6 px-4 text-center">
           <p className="text-xs text-slate-500">Crystal Peak • Not affiliated with Crystal Mountain</p>
-          {data?.generatedAt && (
-            <p className="text-xs text-slate-600 mt-1">Data: {new Date(data.generatedAt).toLocaleTimeString()}</p>
-          )}
+          {data?.generatedAt && <p className="text-xs text-slate-600 mt-1">Data: {new Date(data.generatedAt).toLocaleTimeString()}</p>}
         </footer>
       </div>
     </AppContext.Provider>
